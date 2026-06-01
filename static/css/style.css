@@ -359,6 +359,92 @@ body {
     color: var(--text-secondary); white-space: pre-wrap;
     word-break: break-word; max-height: 200px; overflow-y: auto; line-height: 1.6;
 }
+/* ============================================================
+   Voice Call Styles
+   ============================================================ */
+.btn-voice {
+    color: var(--accent-cyan);
+    border-color: var(--accent-cyan);
+    transition: var(--transition-fast);
+}
+.btn-voice:hover {
+    color: var(--accent-pink);
+    border-color: var(--accent-pink);
+    box-shadow: 0 0 15px var(--accent-pink-glow);
+}
+.btn-voice.active {
+    background: linear-gradient(135deg, var(--accent-pink), var(--accent-purple));
+    color: white;
+    border-color: transparent;
+    animation: voicePulse 1.5s infinite;
+}
+@keyframes voicePulse {
+    0%, 100% { box-shadow: 0 0 10px var(--accent-pink-glow); }
+    50% { box-shadow: 0 0 30px var(--accent-pink-glow), 0 0 60px var(--accent-purple-glow); }
+}
+.btn-voice.listening {
+    background: linear-gradient(135deg, var(--success), var(--accent-cyan));
+    color: white;
+    border-color: transparent;
+    animation: voicePulse 1s infinite;
+}
+.voice-status {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    background: linear-gradient(135deg, rgba(255, 45, 149, 0.1), rgba(139, 92, 246, 0.1));
+    border: 1px solid var(--accent-pink);
+    border-radius: var(--radius-lg);
+    margin-bottom: 10px;
+    animation: fadeInUp 0.3s ease-out;
+}
+.voice-indicator {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.voice-wave {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 24px;
+}
+.voice-wave span {
+    display: block;
+    width: 4px;
+    background: var(--accent-pink);
+    border-radius: 2px;
+    animation: waveAnim 0.8s infinite ease-in-out;
+}
+.voice-wave span:nth-child(1) { height: 8px; animation-delay: 0s; }
+.voice-wave span:nth-child(2) { height: 16px; animation-delay: 0.1s; }
+.voice-wave span:nth-child(3) { height: 24px; animation-delay: 0.2s; }
+.voice-wave span:nth-child(4) { height: 16px; animation-delay: 0.3s; }
+.voice-wave span:nth-child(5) { height: 8px; animation-delay: 0.4s; }
+@keyframes waveAnim {
+    0%, 100% { transform: scaleY(0.4); opacity: 0.4; }
+    50% { transform: scaleY(1); opacity: 1; }
+}
+.voice-wave.speaking span {
+    background: var(--accent-cyan);
+    animation-name: waveAnim2;
+}
+@keyframes waveAnim2 {
+    0%, 100% { transform: scaleY(0.3); opacity: 0.3; }
+    50% { transform: scaleY(1); opacity: 1; }
+}
+.voice-text {
+    font-size: 13px;
+    color: var(--accent-pink);
+    font-weight: 500;
+    font-family: var(--font-cyber);
+    letter-spacing: 1px;
+}
+.voice-text.speaking {
+    color: var(--accent-cyan);
+}
+
 @media (max-width: 768px) {
     .sidebar { position: fixed; left: 0; top: 0; height: 100vh; z-index: 200; }
     .sidebar.closed { margin-left: -300px; }

@@ -1,10 +1,11 @@
 import os, json, re, uuid
 from datetime import datetime
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, send_file
 from flask_cors import CORS
 from PIL import Image
 import requests
+import voice as voice_module
 
 # Config
 OLLAMA_API = "http://localhost:11434/api"
@@ -243,6 +244,364 @@ def _save_learning_result(style_analysis, raw_text):
         "screenshot_count": len(existing_texts)
     })
 
+# Routes: Voice API
+@app.route("/api/voice/asr", methods=["POST"])
+def voice_asr():
+    """语音识别：接收音频，返回文字"""
+    if "audio" not in request.files:
+        # 也支持 raw body
+        audio_data = request.get_data()
+        if not audio_data:
+            return jsonify({"error": "请提供音频数据"}), 400
+    else:
+        audio_file = request.files["audio"]
+        audio_data = audio_file.read()
+
+    if not audio_data:
+        return jsonify({"error": "音频数据为空"}), 400
+
+    # 验证并转换音频格式
+    if not voice_module.validate_wav(audio_data):
+        return jsonify({"error": "无效的音频格式，需要 WAV"}), 400
+
+    audio_data = voice_module.convert_wav_sample_rate(audio_data)
+    language = request.form.get("language", "zh")
+
+    try:
+        result = voice_module.transcribe_audio(audio_data, language)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route("/api/voice/tts", methods=["POST"])
+def voice_tts():
+    """语音合成：接收文字，返回音频"""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "请提供 JSON 数据"}), 400
+
+    text = data.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "文本不能为空"}), 400
+
+    try:
+        audio_bytes = voice_module.synthesize_speech(text)
+        return Response(
+            audio_bytes,
+            mimetype="audio/wav",
+            headers={
+                "Content-Disposition": "inline; filename=response.wav",
+                "Content-Type": "audio/wav",
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/voice/chat", methods=["POST"])
+def voice_chat():
+    """
+    语音对话：接收音频 → ASR → LLM → TTS → 返回文字+音频
+    这是完整的语音通话端点。
+    """
+    if "audio" not in request.files:
+        audio_data = request.get_data()
+        if not audio_data:
+            return jsonify({"error": "请提供音频数据"}), 400
+    else:
+        audio_data = request.files["audio"].read()
+
+    if not audio_data:
+        return jsonify({"error": "音频数据为空"}), 400
+
+    if not voice_module.validate_wav(audio_data):
+        return jsonify({"error": "无效的音频格式，需要 WAV"}), 400
+
+    audio_data = voice_module.convert_wav_sample_rate(audio_data)
+    language = request.form.get("language", "zh")
+
+    # Step 1: ASR
+    try:
+        asr_result = voice_module.transcribe_audio(audio_data, language)
+    except Exception as e:
+        return jsonify({"error": f"语音识别失败: {e}", "success": False}), 500
+
+    user_text = asr_result.get("text", "").strip()
+    if not user_text:
+        return jsonify({
+            "success": True,
+            "user_text": "",
+            "ai_text": "",
+            "audio": None,
+            "message": "未识别到语音内容"
+        })
+
+    # Step 2: LLM Chat
+    system_prompt, messages, custom_name = _build_chat_context()
+    messages.append({"role": "user", "content": user_text})
+
+    try:
+        ai_response = call_ollama(messages, stream=False, system_prompt=system_prompt)
+    except Exception as e:
+        return jsonify({"error": f"AI回复失败: {e}", "success": False}), 500
+
+    # Save chat history
+    history = get_chat_history()
+    history.append({
+        "user": user_text,
+        "ai": ai_response,
+        "timestamp": datetime.now().isoformat()
+    })
+    save_chat_history(history)
+
+    # Step 3: TTS
+    try:
+        audio_bytes = voice_module.synthesize_speech(ai_response)
+        import base64
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+        return jsonify({
+            "success": True,
+            "user_text": user_text,
+            "ai_text": ai_response,
+            "name": custom_name,
+            "audio": audio_b64,
+            "audio_format": "wav",
+        })
+    except Exception as e:
+        # TTS 失败但对话成功，仍返回文字
+        print(f"[Voice] TTS失败: {e}")
+        return jsonify({
+            "success": True,
+            "user_text": user_text,
+            "ai_text": ai_response,
+            "name": custom_name,
+            "audio": None,
+            "tts_error": str(e),
+        })
+
+
+@app.route("/api/voice/tts-stream", methods=["POST"])
+def voice_tts_stream():
+    """
+    流式 TTS：接收文字，逐句合成并返回音频。
+    用于在 LLM 流式输出的同时逐句播放语音。
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "请提供 JSON 数据"}), 400
+
+    text = data.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "文本不能为空"}), 400
+
+    # 按标点分句
+    import re
+    sentences = re.split(r"([。！？，,\.\!\?\n])", text)
+    chunks = []
+    for i in range(0, len(sentences), 2):
+        chunk = sentences[i]
+        if i + 1 < len(sentences):
+            chunk += sentences[i + 1]
+        chunk = chunk.strip()
+        if chunk:
+            chunks.append(chunk)
+
+    def generate():
+        import base64
+        for chunk in chunks:
+            try:
+                audio_bytes = voice_module.synthesize_speech(
+                    chunk, inference_timesteps=3, max_len=512
+                )
+                audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                yield f"data: {json.dumps({'text': chunk, 'audio': audio_b64})}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'text': chunk, 'error': str(e)})}\n\n"
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+    )
+
+
+@app.route("/api/voice/chat-stream", methods=["POST"])
+def voice_chat_stream():
+    """
+    流式语音对话（低延迟）：
+    接收完整音频 → ASR 秒识别 → LLM 流式逐句生成 → 逐句 TTS 合成
+    → SSE 实时推送文本+音频，前端边收边播。
+
+    与旧 /api/voice/chat 的区别：
+    - LLM 出第一句即开始 TTS，不等全文
+    - 分句 TTS 用优化参数（inference_timesteps=3, max_len=512），单句合成 ~1.5s
+    - SSE 长连接推送，前端逐句播放，首句延迟 ~2s（vs 旧版 8s+）
+    """
+    if "audio" not in request.files:
+        audio_data = request.get_data()
+        if not audio_data:
+            return jsonify({"error": "请提供音频数据"}), 400
+    else:
+        audio_data = request.files["audio"].read()
+
+    if not audio_data:
+        return jsonify({"error": "音频数据为空"}), 400
+
+    if not voice_module.validate_wav(audio_data):
+        return jsonify({"error": "无效的音频格式，需要 WAV"}), 400
+
+    audio_data = voice_module.convert_wav_sample_rate(audio_data)
+    language = request.form.get("language", "zh")
+
+    # Step 1: ASR（SenseVoiceSmall GPU，通常 < 100ms）
+    try:
+        asr_result = voice_module.transcribe_audio(audio_data, language)
+    except Exception as e:
+        return jsonify({"error": f"语音识别失败: {e}", "success": False}), 500
+
+    user_text = asr_result.get("text", "").strip()
+    system_prompt, messages, custom_name = _build_chat_context()
+
+    if not user_text:
+        def _empty_gen():
+            yield f"data: {json.dumps({'type': 'user', 'text': '', 'name': custom_name})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'name': custom_name})}\n\n"
+        return Response(
+            _empty_gen(), mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+        )
+
+    messages.append({"role": "user", "content": user_text})
+
+    def generate():
+        import base64, re as _re
+        full_response = ""
+        current_buffer = ""
+
+        # 先推送用户文本
+        yield f"data: {json.dumps({'type': 'user', 'text': user_text, 'name': custom_name})}\n\n"
+
+        try:
+            resp = call_ollama(messages, stream=True, system_prompt=system_prompt)
+
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line.decode("utf-8"))
+                except json.JSONDecodeError:
+                    continue
+
+                content = chunk.get("message", {}).get("content", "")
+                if not content:
+                    continue
+
+                full_response += content
+                current_buffer += content
+
+                # 逐句切割 → 即时 TTS 推送
+                while True:
+                    match = _re.search(r'[。！？\n～…]', current_buffer)
+                    if not match:
+                        # 无标点的长句：超过 60 字强制在逗号处断句
+                        if len(current_buffer) > 60:
+                            comma = _re.search(r'[，,]\s*', current_buffer)
+                            if comma and comma.start() > 8:
+                                end_pos = comma.end()
+                            else:
+                                end_pos = 60
+                            sentence = current_buffer[:end_pos].strip()
+                            current_buffer = current_buffer[end_pos:]
+                        else:
+                            break
+                    else:
+                        end_pos = match.end()
+                        sentence = current_buffer[:end_pos].strip()
+                        current_buffer = current_buffer[end_pos:]
+
+                    if not sentence:
+                        continue
+
+                    # 分句 TTS（语音通话优化参数）
+                    try:
+                        audio_bytes = voice_module.synthesize_speech(
+                            sentence,
+                            inference_timesteps=3,
+                            max_len=512,
+                        )
+                        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                        yield f"data: {json.dumps({'type': 'sentence', 'text': sentence, 'audio': audio_b64})}\n\n"
+                    except Exception as e:
+                        print(f"[Voice] TTS 分句失败 ({sentence[:20]}...): {e}")
+                        yield f"data: {json.dumps({'type': 'sentence', 'text': sentence, 'audio': None, 'tts_error': str(e)})}\n\n"
+
+            # 处理剩余文本
+            remaining = current_buffer.strip()
+            if remaining:
+                try:
+                    audio_bytes = voice_module.synthesize_speech(
+                        remaining, inference_timesteps=3, max_len=512
+                    )
+                    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                    yield f"data: {json.dumps({'type': 'sentence', 'text': remaining, 'audio': audio_b64})}\n\n"
+                except Exception as e:
+                    print(f"[Voice] TTS 尾句失败: {e}")
+                    yield f"data: {json.dumps({'type': 'sentence', 'text': remaining, 'audio': None})}\n\n"
+
+            # 异步落库（不阻塞 SSE 流）
+            history = get_chat_history()
+            history.append({
+                "user": user_text,
+                "ai": full_response,
+                "timestamp": datetime.now().isoformat()
+            })
+            save_chat_history(history)
+
+            yield f"data: {json.dumps({'type': 'done', 'name': custom_name, 'full_text': full_response})}\n\n"
+
+        except Exception as e:
+            print(f"[Voice] 流式对话异常: {e}")
+            # 尽力保存已有内容
+            if full_response:
+                try:
+                    history = get_chat_history()
+                    history.append({
+                        "user": user_text,
+                        "ai": full_response,
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    save_chat_history(history)
+                except Exception:
+                    pass
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'name': custom_name})}\n\n"
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+@app.route("/api/voice/status", methods=["GET"])
+def voice_status():
+    """查询语音模块加载状态"""
+    try:
+        status = voice_module.get_voice_status()
+        return jsonify({"success": True, **status})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 # Routes: Pages
 @app.route("/")
 def index():
@@ -478,8 +837,20 @@ def api_clear_history():
 if __name__ == "__main__":
     print("=" * 50)
     print("  赛博女友 - AI伴侣")
-    print(f"  模型: {MODEL_NAME}")
-    print(f"  Ollama: {OLLAMA_API}")
-    print(f"  访问地址: http://localhost:5000")
+    print(f"  对话模型: {MODEL_NAME}")
+    print(f"  Ollama API: {OLLAMA_API}")
     print("=" * 50)
-    app.run(host="0.0.0.0", port=5000, debug=True)
+
+    # 预加载语音模型
+    print("\n正在预加载语音模型，请稍候...\n")
+    try:
+        voice_module.init_models()
+    except Exception as e:
+        print(f"[Voice] 模型预加载异常: {e}")
+
+    print(f"\n  访问地址: http://localhost:5000")
+    print("=" * 50)
+
+    # 关键：use_reloader=False 防止 Flask 双进程导致 CUDA 上下文冲突
+    # debug=True 保留开发模式（错误页面、热重载除外）
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
