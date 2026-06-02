@@ -1,6 +1,5 @@
-
 // ============================================================
-// Cyber GF - Main JavaScript
+// Cyber GF v2.0 — WebSocket 实时语音 + 设置面板
 // ============================================================
 
 // State
@@ -9,7 +8,7 @@ const state = {
     aiAvatar: '/static/uploads/avatars/default_ai.png',
     userAvatar: '/static/uploads/avatars/default_user.png',
     isStreaming: false,
-    sidebarOpen: true,
+    settingsOpen: false,
     // Voice state
     voiceActive: false,
     voiceListening: false,
@@ -17,42 +16,57 @@ const state = {
     mediaRecorder: null,
     audioChunks: [],
     audioContext: null,
+    // WebSocket
+    ws: null,
+    wsConnected: false,
+    // Audio queue
+    audioQueue: [],
+    isPlayingAudio: false,
+    currentAudio: null,
+    interruptRequested: false,
+    // Call UI
+    callMinimized: false,
+    callMuted: false,
+    callStartTime: null,
+    callTimerInterval: null,
 };
 
 // DOM Elements
 const el = (sel) => document.querySelector(sel);
-const els = (sel) => document.querySelectorAll(sel);
 
 const dom = {
-    chatMessages: el('.chat-messages'),
+    // Chat
+    chatMessages: el('#chatMessages'),
     messageInput: el('#messageInput'),
     sendBtn: el('#sendBtn'),
     typingIndicator: el('#typingIndicator'),
     typingAvatarImg: el('#typingAvatarImg'),
-    sidebar: el('#sidebar'),
-    sidebarToggle: el('#sidebarToggle'),
-    menuBtn: el('#menuBtn'),
     headerName: el('#headerName'),
     headerAvatarImg: el('#headerAvatarImg'),
+    // Settings
+    settingsBtn: el('#settingsBtn'),
+    settingsOverlay: el('#settingsOverlay'),
+    settingsPanel: el('#settingsPanel'),
+    settingsClose: el('#settingsClose'),
+    settingsTabs: el('#settingsTabs'),
+    // Avatar
     aiAvatarImg: el('#aiAvatarImg'),
     aiAvatarInput: el('#aiAvatarInput'),
     userAvatarImg: el('#userAvatarImg'),
     userAvatarInput: el('#userAvatarInput'),
     removeAiAvatar: el('#removeAiAvatar'),
     removeUserAvatar: el('#removeUserAvatar'),
+    // Name & Style
     aiNameInput: el('#aiNameInput'),
     saveNameBtn: el('#saveNameBtn'),
     screenshotInput: el('#screenshotInput'),
-    pasteTextBtn: el('#pasteTextBtn'),
+    submitPasteBtn: el('#submitPasteBtn'),
+    pasteTextArea: el('#pasteTextArea'),
     learnStatus: el('#learnStatus'),
     styleProfileBox: el('#styleProfileBox'),
     resetBtn: el('#resetBtn'),
     clearChatBtn: el('#clearChatBtn'),
-    pasteModal: el('#pasteModal'),
-    pasteTextArea: el('#pasteTextArea'),
-    confirmPasteBtn: el('#confirmPasteBtn'),
-    closePasteModal: el('#closePasteModal'),
-    cancelPasteBtn: el('#cancelPasteBtn'),
+    // Modal
     learnResultModal: el('#learnResultModal'),
     learnOcrText: el('#learnOcrText'),
     learnStyleAnalysis: el('#learnStyleAnalysis'),
@@ -62,56 +76,116 @@ const dom = {
     voiceCallBtn: el('#voiceCallBtn'),
     voiceStatus: el('#voiceStatus'),
     voiceStatusText: el('#voiceStatusText'),
-    voiceWave: el('.voice-wave'),
+    voiceWaveBar: el('#voiceWaveBar'),
     voiceAudio: el('#voiceAudio'),
     endVoiceBtn: el('#endVoiceBtn'),
+    interruptBtn: el('#interruptBtn'),
     inputContainer: el('#inputContainer'),
+    // Model Config
+    cfgOllamaUrl: el('#cfgOllamaUrl'),
+    cfgModelName: el('#cfgModelName'),
+    cfgTtsProvider: el('#cfgTtsProvider'),
+    cfgCosyvoiceKey: el('#cfgCosyvoiceKey'),
+    cfgCosyvoiceVoice: el('#cfgCosyvoiceVoice'),
+    ttsVoiceGrid: el('#ttsVoiceGrid'),
+    cfgAsrEngine: el('#cfgAsrEngine'),
+    saveSettingsBtn: el('#saveSettingsBtn'),
+    settingsSaveStatus: el('#settingsSaveStatus'),
+    cosyvoiceConfig: el('#cosyvoiceConfig'),
+    testApiBtn: el('#testApiBtn'),
+    apiTestStatus: el('#apiTestStatus'),
+    // Voice Call UI
+    callOverlay: el('#callOverlay'),
+    callMinimizeBtn: el('#callMinimizeBtn'),
+    callTimer: el('#callTimer'),
+    callAvatarImg: el('#callAvatarImg'),
+    callAvatarRing: el('#callAvatarRing'),
+    callName: el('#callName'),
+    callStatusLabel: el('#callStatusLabel'),
+    callUserText: el('#callUserText'),
+    callInterruptBtn: el('#callInterruptBtn'),
+    callEndBtn: el('#callEndBtn'),
+    callMuteBtn: el('#callMuteBtn'),
+    callFloatBadge: el('#callFloatBadge'),
+    callFloatTimer: el('#callFloatTimer'),
+    callFloatEndBtn: el('#callFloatEndBtn'),
+    callFloatAvatarImg: el('#callFloatAvatarImg'),
 };
 
 // ============================================================
 // Initialization
 // ============================================================
 async function init() {
-    await loadProfile();
+    await loadAllSettings();
     setupEventListeners();
     scrollToBottom();
 }
 
-async function loadProfile() {
+async function loadAllSettings() {
     try {
-        const resp = await fetch('/api/profile');
+        const resp = await fetch('/api/settings');
         const data = await resp.json();
-        if (data.name) {
-            state.aiName = data.name;
-            dom.headerName.textContent = data.name;
-            dom.aiNameInput.value = data.name;
+        if (!data.success) return;
+
+        // Profile
+        const p = data.profile;
+        if (p.name) {
+            state.aiName = p.name;
+            dom.headerName.textContent = p.name;
+            dom.aiNameInput.value = p.name;
         }
-        if (data.style_analysis) {
-            dom.styleProfileBox.textContent = data.style_analysis;
+        if (p.style_analysis) {
+            dom.styleProfileBox.textContent = p.style_analysis;
         }
-        if (data.avatar_ai) {
-            state.aiAvatar = '/static/uploads/avatars/' + data.avatar_ai;
+        if (p.avatar_ai) {
+            state.aiAvatar = '/static/uploads/avatars/' + p.avatar_ai;
             dom.aiAvatarImg.src = state.aiAvatar;
             dom.headerAvatarImg.src = state.aiAvatar;
             dom.typingAvatarImg.src = state.aiAvatar;
         }
-        if (data.avatar_user) {
-            state.userAvatar = '/static/uploads/avatars/' + data.avatar_user;
+        if (p.avatar_user) {
+            state.userAvatar = '/static/uploads/avatars/' + p.avatar_user;
             dom.userAvatarImg.src = state.userAvatar;
         }
-        if (data.screenshot_count > 0) {
-            dom.learnStatus.textContent = '已从 ' + data.screenshot_count + ' 张截图学习';
+        if (p.screenshot_count > 0) {
+            dom.learnStatus.textContent = '已从 ' + p.screenshot_count + ' 次学习';
             dom.learnStatus.className = 'learn-status success';
         }
+
+        // Model Settings
+        const s = data.settings;
+        if (s.ollama_url) dom.cfgOllamaUrl.value = s.ollama_url;
+        if (s.model_name) {
+            // 尝试匹配 select option，找不到则保留现有选择
+            const opt = dom.cfgModelName.querySelector(`option[value="${s.model_name}"]`);
+            if (opt) dom.cfgModelName.value = s.model_name;
+        }
+        if (s.tts_provider) dom.cfgTtsProvider.value = s.tts_provider;
+        if (s.cosyvoice_api_key) dom.cfgCosyvoiceKey.value = s.cosyvoice_api_key;
+        if (s.cosyvoice_voice) {
+            dom.cfgCosyvoiceVoice.value = s.cosyvoice_voice;
+            // 恢复语音卡片选中状态
+            dom.ttsVoiceGrid.querySelectorAll('.tts-voice-card').forEach(c => {
+                c.classList.toggle('selected', c.dataset.voice === s.cosyvoice_voice);
+            });
+        }
+
+        updateTtsProviderUI();
     } catch (e) {
-        console.error('加载配置失败：', e);
+        console.error('加载设置失败：', e);
     }
+}
+
+function updateTtsProviderUI() {
+    const provider = dom.cfgTtsProvider.value;
+    dom.cosyvoiceConfig.style.display = provider === 'cosyvoice' ? 'block' : 'none';
 }
 
 // ============================================================
 // Event Listeners
 // ============================================================
 function setupEventListeners() {
+    // Chat
     dom.sendBtn.addEventListener('click', sendMessage);
     dom.messageInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -120,26 +194,83 @@ function setupEventListeners() {
         }
     });
     dom.messageInput.addEventListener('input', autoResizeTextarea);
-    dom.sidebarToggle.addEventListener('click', toggleSidebar);
-    dom.menuBtn.addEventListener('click', toggleSidebar);
+
+    // Settings panel
+    dom.settingsBtn.addEventListener('click', openSettings);
+    dom.settingsClose.addEventListener('click', closeSettings);
+    dom.settingsOverlay.addEventListener('click', (e) => {
+        // 只有点击遮罩背景时才关闭，点击面板内部不关闭
+        if (e.target === dom.settingsOverlay) closeSettings();
+    });
+    // 阻止面板内部点击冒泡到 overlay
+    dom.settingsPanel.addEventListener('click', (e) => e.stopPropagation());
+    dom.settingsTabs.addEventListener('click', (e) => {
+        if (e.target.classList.contains('settings-tab')) {
+            switchSettingsTab(e.target.dataset.tab);
+        }
+    });
+    dom.cfgTtsProvider.addEventListener('change', updateTtsProviderUI);
+    dom.saveSettingsBtn.addEventListener('click', saveModelSettings);
+
+    // TTS voice card selection + preview
+    dom.ttsVoiceGrid.addEventListener('click', (e) => {
+        const card = e.target.closest('.tts-voice-card');
+        if (!card) return;
+        // 预览按钮
+        if (e.target.closest('.voice-preview-btn')) {
+            previewVoice(card.dataset.voice, e.target.closest('.voice-preview-btn'));
+            return;
+        }
+        // 选择卡片
+        dom.ttsVoiceGrid.querySelectorAll('.tts-voice-card').forEach(c => c.classList.remove('selected'));
+        card.classList.add('selected');
+        dom.cfgCosyvoiceVoice.value = card.dataset.voice;
+    });
+
+    // API 测试按钮
+    dom.testApiBtn.addEventListener('click', testApiConnection);
+
+    // 语音通话 UI
+    dom.callMinimizeBtn.addEventListener('click', minimizeCall);
+    dom.callEndBtn.addEventListener('click', endVoiceCall);
+    dom.callFloatEndBtn.addEventListener('click', endVoiceCall);
+    dom.callFloatBadge.addEventListener('click', restoreCall);
+    dom.callInterruptBtn.addEventListener('click', interruptVoice);
+    dom.callMuteBtn.addEventListener('click', toggleMute);
+
+    // Avatar
     dom.aiAvatarInput.addEventListener('change', (e) => uploadAvatar(e, 'ai'));
     dom.userAvatarInput.addEventListener('change', (e) => uploadAvatar(e, 'user'));
     dom.removeAiAvatar.addEventListener('click', () => removeAvatar('ai'));
     dom.removeUserAvatar.addEventListener('click', () => removeAvatar('user'));
+
+    // Name
     dom.saveNameBtn.addEventListener('click', saveName);
+
+    // Learning
     dom.screenshotInput.addEventListener('change', uploadScreenshot);
-    dom.pasteTextBtn.addEventListener('click', openPasteModal);
-    dom.closePasteModal.addEventListener('click', closePasteModal);
-    dom.cancelPasteBtn.addEventListener('click', closePasteModal);
-    dom.confirmPasteBtn.addEventListener('click', submitPasteText);
+    dom.submitPasteBtn.addEventListener('click', submitPasteText);
+
+    // Modal
     dom.closeLearnModal.addEventListener('click', closeLearnModal);
     dom.closeLearnBtn.addEventListener('click', closeLearnModal);
+
+    // Reset & Clear
     dom.resetBtn.addEventListener('click', resetAll);
     dom.clearChatBtn.addEventListener('click', clearChat);
-    // Voice
+
+    // Voice — WebSocket based
     dom.voiceCallBtn.addEventListener('click', toggleVoiceCall);
     dom.endVoiceBtn.addEventListener('click', endVoiceCall);
+    dom.interruptBtn.addEventListener('click', interruptVoice);
     dom.voiceAudio.addEventListener('ended', onAudioPlaybackEnded);
+
+    // Keyboard: Esc to close settings
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && state.settingsOpen) {
+            closeSettings();
+        }
+    });
 }
 
 // ============================================================
@@ -281,14 +412,73 @@ function autoResizeTextarea() {
 }
 
 // ============================================================
-// Sidebar
+// Settings Panel
 // ============================================================
-function toggleSidebar() {
-    state.sidebarOpen = !state.sidebarOpen;
-    if (state.sidebarOpen) {
-        dom.sidebar.classList.remove('closed');
-    } else {
-        dom.sidebar.classList.add('closed');
+function openSettings() {
+    if (state.settingsOpen) return;
+    state.settingsOpen = true;
+    dom.settingsOverlay.style.display = 'flex';
+    dom.settingsPanel.classList.remove('closing');
+    dom.settingsOverlay.classList.remove('closing');
+    loadAllSettings();
+    document.body.style.overflow = 'hidden';
+}
+
+function closeSettings() {
+    if (!state.settingsOpen) return;
+    state.settingsOpen = false;
+    dom.settingsPanel.classList.add('closing');
+    dom.settingsOverlay.classList.add('closing');
+    setTimeout(() => {
+        dom.settingsOverlay.style.display = 'none';
+        dom.settingsPanel.classList.remove('closing');
+        dom.settingsOverlay.classList.remove('closing');
+        document.body.style.overflow = '';
+    }, 220);
+}
+
+function switchSettingsTab(tabId) {
+    // Update tab buttons
+    dom.settingsTabs.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+    dom.settingsTabs.querySelector(`[data-tab="${tabId}"]`).classList.add('active');
+    // Update content
+    document.querySelectorAll('.settings-tab-content').forEach(c => c.classList.remove('active'));
+    document.getElementById(tabId).classList.add('active');
+}
+
+async function saveModelSettings() {
+    const payload = {
+        ollama_url: dom.cfgOllamaUrl.value.trim(),
+        model_name: dom.cfgModelName.value.trim(),
+        tts_provider: dom.cfgTtsProvider.value,
+        cosyvoice_api_key: dom.cfgCosyvoiceKey.value.trim(),
+        cosyvoice_voice: dom.cfgCosyvoiceVoice.value,
+    };
+
+    dom.settingsSaveStatus.textContent = '保存中...';
+    dom.settingsSaveStatus.className = 'settings-save-status';
+
+    try {
+        const resp = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+        if (data.success) {
+            dom.settingsSaveStatus.textContent = '✓ 设置已保存';
+            dom.settingsSaveStatus.className = 'settings-save-status success';
+            setTimeout(() => {
+                dom.settingsSaveStatus.textContent = '';
+                dom.settingsSaveStatus.className = 'settings-save-status';
+            }, 3000);
+        } else {
+            dom.settingsSaveStatus.textContent = '保存失败：' + (data.error || '未知错误');
+            dom.settingsSaveStatus.className = 'settings-save-status error';
+        }
+    } catch (e) {
+        dom.settingsSaveStatus.textContent = '保存错误：' + e.message;
+        dom.settingsSaveStatus.className = 'settings-save-status error';
     }
 }
 
@@ -412,16 +602,6 @@ async function uploadScreenshot(event) {
     event.target.value = '';
 }
 
-function openPasteModal() {
-    dom.pasteModal.style.display = 'flex';
-    dom.pasteTextArea.focus();
-}
-
-function closePasteModal() {
-    dom.pasteModal.style.display = 'none';
-    dom.pasteTextArea.value = '';
-}
-
 async function submitPasteText() {
     const text = dom.pasteTextArea.value.trim();
     if (!text) {
@@ -431,7 +611,6 @@ async function submitPasteText() {
 
     dom.learnStatus.textContent = '正在分析文本...';
     dom.learnStatus.className = 'learn-status loading';
-    closePasteModal();
 
     try {
         const resp = await fetch('/api/upload-raw-text', {
@@ -446,10 +625,10 @@ async function submitPasteText() {
             dom.learnStatus.className = 'learn-status success';
             dom.styleProfileBox.textContent = data.style_analysis;
 
-            // Show result modal
             dom.learnOcrText.textContent = text;
             dom.learnStyleAnalysis.textContent = data.style_analysis;
             dom.learnResultModal.style.display = 'flex';
+            dom.pasteTextArea.value = '';
         } else {
             dom.learnStatus.textContent = '失败：' + (data.error || '未知错误');
             dom.learnStatus.className = 'learn-status error';
@@ -472,8 +651,8 @@ async function resetAll() {
 
     try {
         await fetch('/api/reset', { method: 'POST' });
-        dom.chatMessages.innerHTML = '<div class="welcome-message"><div class="welcome-icon">💕</div><h3>赛博女友</h3><p>你的 AI 伴侣，由 Ollama 驱动</p><p class="welcome-hint">开始聊天，或上传聊天截图让她学习你的说话风格！</p></div>';
-        dom.styleProfileBox.innerHTML = '<span class="text-muted">暂无风格数据...</span>';
+        dom.chatMessages.innerHTML = '<div class="welcome-message"><div class="welcome-icon">💕</div><h3>痞老板的凯伦</h3><p>质疑痞老板，理解痞老板，成为痞老板</p><p class="welcome-hint">开始聊天吧！点击右上角 📞 开始语音通话</p></div>';
+        dom.styleProfileBox.innerHTML = '<span class="text-muted">暂无风格数据，上传聊天记录让 AI 学习你的风格...</span>';
         dom.learnStatus.textContent = '';
         dom.learnStatus.className = 'learn-status';
         state.aiName = '小赛';
@@ -485,7 +664,17 @@ async function resetAll() {
         dom.userAvatarImg.src = state.userAvatar;
         dom.headerAvatarImg.src = state.aiAvatar;
         dom.typingAvatarImg.src = state.aiAvatar;
-        await loadProfile();
+        // Reset model config fields
+        dom.cfgOllamaUrl.value = 'http://localhost:11434/api';
+        dom.cfgModelName.value = 'qwen2.5:7b-instruct';
+        dom.cfgTtsProvider.value = 'cosyvoice';
+        dom.cfgCosyvoiceKey.value = '';
+        dom.cfgCosyvoiceVoice.value = 'longxing_v3';
+        dom.ttsVoiceGrid.querySelectorAll('.tts-voice-card').forEach(c => {
+            c.classList.toggle('selected', c.dataset.voice === 'longxing_v3');
+        });
+        updateTtsProviderUI();
+        await loadAllSettings();
     } catch (e) {
         alert('重置失败：' + e.message);
     }
@@ -494,14 +683,178 @@ async function resetAll() {
 async function clearChat() {
     try {
         await fetch('/api/chat-history', { method: 'DELETE' });
-        dom.chatMessages.innerHTML = '<div class="welcome-message"><div class="welcome-icon">💕</div><h3>赛博女友</h3><p>你的 AI 伴侣，由 Ollama 驱动</p><p class="welcome-hint">开始聊天，或上传聊天截图让她学习你的说话风格！</p></div>';
+        dom.chatMessages.innerHTML = '<div class="welcome-message"><div class="welcome-icon">💕</div><h3>痞老板的凯伦</h3><p>质疑痞老板，理解痞老板，成为痞老板</p><p class="welcome-hint">开始聊天吧！点击右上角 📞 开始语音通话</p></div>';
     } catch (e) {
         alert('清空失败：' + e.message);
     }
 }
 
 // ============================================================
-// Voice Call Functions
+// API Test & Voice Preview
+// ============================================================
+async function testApiConnection() {
+    const key = dom.cfgCosyvoiceKey.value.trim();
+    if (!key) { dom.apiTestStatus.textContent = '请先输入 API Key'; dom.apiTestStatus.className = 'test-status error'; return; }
+
+    dom.apiTestStatus.textContent = '测试中...';
+    dom.apiTestStatus.className = 'test-status loading';
+
+    try {
+        const resp = await fetch('/api/voice/tts/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                text: '测试连接',
+                provider: 'cosyvoice',
+                api_key: key,
+                voice: dom.cfgCosyvoiceVoice.value
+            })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            dom.apiTestStatus.textContent = '✓ 连接成功！点击下方「保存设置」以持久化';
+            dom.apiTestStatus.className = 'test-status success';
+        } else {
+            dom.apiTestStatus.textContent = '✗ 失败：' + (data.error || '未知错误');
+            dom.apiTestStatus.className = 'test-status error';
+        }
+    } catch (e) {
+        dom.apiTestStatus.textContent = '✗ 请求失败：' + e.message;
+        dom.apiTestStatus.className = 'test-status error';
+    }
+}
+
+let _previewAudio = null;
+async function previewVoice(voiceName, btnEl) {
+    if (_previewAudio) { _previewAudio.pause(); _previewAudio = null; }
+    const playing = document.querySelector('.voice-preview-btn.playing');
+    if (playing) playing.classList.remove('playing');
+
+    btnEl.classList.add('playing');
+    try {
+        const resp = await fetch('/api/voice/tts/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                text: '你好呀，我是你的AI伴侣，很高兴能陪你聊天~',
+                provider: 'cosyvoice',
+                api_key: dom.cfgCosyvoiceKey.value.trim(),
+                voice: voiceName
+            })
+        });
+        const data = await resp.json();
+        if (data.success && data.audio) {
+            const blob = base64ToBlob(data.audio, 'audio/wav');
+            const url = URL.createObjectURL(blob);
+            _previewAudio = new Audio(url);
+            _previewAudio.onended = () => { btnEl.classList.remove('playing'); URL.revokeObjectURL(url); _previewAudio = null; };
+            _previewAudio.play();
+        } else {
+            btnEl.classList.remove('playing');
+            alert('试听失败：' + (data.error || '未知错误'));
+        }
+    } catch (e) {
+        btnEl.classList.remove('playing');
+        alert('试听失败：' + e.message);
+    }
+}
+
+// ============================================================
+// Call UI (Fullscreen / Minimized)
+// ============================================================
+function showCallUI() {
+    state.callMinimized = false;
+    dom.callOverlay.style.display = 'flex';
+    dom.callFloatBadge.style.display = 'none';
+    dom.callAvatarImg.src = state.aiAvatar;
+    dom.callFloatAvatarImg.src = state.aiAvatar;
+    dom.callName.textContent = state.aiName;
+    dom.callUserText.textContent = '';
+    startCallTimer();
+}
+
+function hideCallUI() {
+    dom.callOverlay.style.display = 'none';
+    dom.callFloatBadge.style.display = 'none';
+    stopCallTimer();
+}
+
+function minimizeCall() {
+    state.callMinimized = true;
+    document.querySelector('.call-screen').style.display = 'none';
+    dom.callFloatBadge.style.display = 'flex';
+    dom.callFloatAvatarImg.src = state.aiAvatar;
+    updateCallFloatTimer();
+    // 显示内联语音状态栏 + 恢复文字输入
+    dom.voiceStatus.style.display = 'flex';
+    dom.inputContainer.style.opacity = '1';
+    dom.messageInput.disabled = false;
+    dom.sendBtn.disabled = false;
+}
+
+function restoreCall() {
+    state.callMinimized = false;
+    document.querySelector('.call-screen').style.display = 'flex';
+    dom.callFloatBadge.style.display = 'none';
+    dom.voiceStatus.style.display = 'none';
+}
+
+function toggleMute() {
+    state.callMuted = !state.callMuted;
+    if (state.audioStream) {
+        state.audioStream.getAudioTracks().forEach(t => { t.enabled = !state.callMuted; });
+    }
+    // 切换图标：显示/隐藏斜杠
+    const onIcon = dom.callMuteBtn.querySelector('.mute-icon-on');
+    const offIcon = dom.callMuteBtn.querySelector('.mute-icon-off');
+    if (state.callMuted) {
+        onIcon.style.display = 'none';
+        offIcon.style.display = 'block';
+        dom.callMuteBtn.style.color = 'var(--danger)';
+    } else {
+        onIcon.style.display = 'block';
+        offIcon.style.display = 'none';
+        dom.callMuteBtn.style.color = 'var(--text-secondary)';
+    }
+}
+
+function startCallTimer() {
+    state.callStartTime = Date.now();
+    state.callTimerInterval = setInterval(updateCallTimer, 1000);
+    updateCallTimer();
+}
+
+function stopCallTimer() {
+    if (state.callTimerInterval) { clearInterval(state.callTimerInterval); state.callTimerInterval = null; }
+    state.callStartTime = null;
+}
+
+function updateCallTimer() {
+    if (!state.callStartTime) return;
+    const elapsed = Math.floor((Date.now() - state.callStartTime) / 1000);
+    const m = Math.floor(elapsed / 60).toString().padStart(2, '0');
+    const s = (elapsed % 60).toString().padStart(2, '0');
+    dom.callTimer.textContent = m + ':' + s;
+    updateCallFloatTimer();
+}
+
+function updateCallFloatTimer() {
+    if (!state.callStartTime) return;
+    const elapsed = Math.floor((Date.now() - state.callStartTime) / 1000);
+    const m = Math.floor(elapsed / 60).toString().padStart(2, '0');
+    const s = (elapsed % 60).toString().padStart(2, '0');
+    dom.callFloatTimer.textContent = m + ':' + s;
+}
+
+function updateCallStatus(statusType, text) {
+    dom.callStatusLabel.textContent = text;
+    dom.callStatusLabel.className = 'call-status-text ' + statusType;
+    // Also update inline status
+    updateVoiceStatus(statusType, text);
+}
+
+// ============================================================
+// Voice Call Functions (WebSocket 实时流式)
 // ============================================================
 
 /**
@@ -513,16 +866,23 @@ async function toggleVoiceCall() {
         return;
     }
 
-    // 请求麦克风权限
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                sampleRate: 16000,
+                channelCount: 1,
+            }
+        });
         state.audioStream = stream;
         startVoiceCall();
     } catch (e) {
         if (e.name === 'NotAllowedError') {
-            alert('需要麦克风权限才能使用语音通话功能，请在浏览器设置中允许麦克风访问。');
+            alert('需要麦克风权限才能使用语音通话功能。');
         } else if (e.name === 'NotFoundError') {
-            alert('未检测到麦克风设备，请检查麦克风连接。');
+            alert('未检测到麦克风设备。');
         } else {
             alert('无法访问麦克风：' + e.message);
         }
@@ -530,17 +890,22 @@ async function toggleVoiceCall() {
 }
 
 /**
- * 开始语音通话
+ * 开始语音通话 — WebSocket 模式 + 全屏通话界面
  */
 function startVoiceCall() {
     state.voiceActive = true;
+    state.interruptRequested = false;
+    state.callMuted = false;
     dom.voiceCallBtn.classList.add('active');
-    dom.voiceStatus.style.display = 'flex';
-    dom.inputContainer.style.opacity = '0.5';
-    dom.messageInput.disabled = true;
-    dom.sendBtn.disabled = true;
 
-    updateVoiceStatus('listening', '正在听...');
+    // 显示全屏通话界面，隐藏内联状态栏
+    dom.voiceStatus.style.display = 'none';
+    showCallUI();
+
+    // 连接 WebSocket
+    connectVoiceWebSocket();
+
+    updateCallStatus('listening', '正在听...');
     startListening();
 }
 
@@ -550,35 +915,253 @@ function startVoiceCall() {
 function endVoiceCall() {
     state.voiceActive = false;
     stopListening();
+    disconnectVoiceWebSocket();
 
-    // 停止所有音频
     if (state.audioStream) {
         state.audioStream.getTracks().forEach(t => t.stop());
         state.audioStream = null;
     }
-    dom.voiceAudio.pause();
-    dom.voiceAudio.src = '';
+    stopAllAudio();
 
-    // 恢复 UI
+    // 隐藏通话界面
+    hideCallUI();
+
+    // 恢复聊天 UI
     dom.voiceCallBtn.classList.remove('active', 'listening');
     dom.voiceStatus.style.display = 'none';
+    dom.interruptBtn.style.display = 'none';
     dom.inputContainer.style.opacity = '1';
     dom.messageInput.disabled = false;
     dom.sendBtn.disabled = false;
     dom.messageInput.focus();
-    dom.voiceWave.classList.remove('speaking');
+    dom.voiceWaveBar.classList.remove('speaking');
+}
+
+// ============================================================
+// WebSocket 语音连接管理
+// ============================================================
+function connectVoiceWebSocket() {
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) return;
+
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${location.host}/ws/voice`;
+
+    console.log('[WS] 连接中...', wsUrl);
+    state.ws = new WebSocket(wsUrl);
+    state.wsConnected = false;
+
+    state.ws.onopen = () => {
+        console.log('[WS] 已连接');
+        state.wsConnected = true;
+    };
+
+    state.ws.onmessage = (event) => {
+        try {
+            const msg = JSON.parse(event.data);
+            handleWsMessage(msg);
+        } catch (e) {
+            console.error('[WS] 消息解析失败:', e);
+        }
+    };
+
+    state.ws.onclose = () => {
+        console.log('[WS] 连接关闭');
+        state.wsConnected = false;
+        // 自动重连
+        if (state.voiceActive && !state.interruptRequested) {
+            setTimeout(() => {
+                if (state.voiceActive) {
+                    console.log('[WS] 尝试重连...');
+                    connectVoiceWebSocket();
+                }
+            }, 2000);
+        }
+    };
+
+    state.ws.onerror = (e) => {
+        console.error('[WS] 连接错误:', e);
+    };
+}
+
+function disconnectVoiceWebSocket() {
+    if (state.ws) {
+        state.ws.onclose = null; // 阻止自动重连
+        state.ws.close();
+        state.ws = null;
+    }
+    state.wsConnected = false;
+}
+
+function sendWsMessage(data) {
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify(data));
+    } else {
+        console.warn('[WS] 未连接，无法发送消息');
+    }
 }
 
 /**
- * 开始录音
+ * 处理 WebSocket 消息
  */
+let _wsAiBubble = null;
+let _wsAiFullText = '';
+
+function handleWsMessage(msg) {
+    switch (msg.type) {
+        case 'user_text':
+            if (msg.text) {
+                addMessage('user', msg.text);
+                // Show in call subtitle
+                dom.callUserText.textContent = msg.text;
+                _wsAiBubble = null;
+                _wsAiFullText = '';
+            }
+            updateCallStatus('processing', '思考中...');
+            state.interruptRequested = false;
+            break;
+
+        case 'ai_text':
+            if (msg.text) {
+                _wsAiFullText += msg.text;
+                if (!_wsAiBubble) {
+                    _wsAiBubble = createMessageBubble('ai', '');
+                    dom.chatMessages.appendChild(_wsAiBubble);
+                }
+                _wsAiBubble.querySelector('.message-bubble').textContent = _wsAiFullText;
+                scrollToBottom();
+            }
+            break;
+
+        case 'tts_audio':
+            if (msg.data) {
+                const audioBlob = base64ToBlob(msg.data, 'audio/wav');
+                state.audioQueue.push({ blob: audioBlob });
+                if (!state.isPlayingAudio) {
+                    playNextInQueue();
+                }
+                updateCallStatus('speaking', '正在说...');
+            }
+            break;
+
+        case 'interrupted':
+            stopAllAudio();
+            state.audioQueue = [];
+            state.isPlayingAudio = false;
+            _wsAiBubble = null;
+            _wsAiFullText = '';
+            updateCallStatus('listening', '正在听...');
+            dom.callUserText.textContent = '';
+            startListening();
+            break;
+
+        case 'done':
+            if (msg.name) state.aiName = msg.name;
+            if (!state.isPlayingAudio && state.audioQueue.length === 0) {
+                finishVoiceTurn();
+            }
+            break;
+
+        case 'error':
+            console.error('[WS] 服务端错误:', msg.error);
+            updateCallStatus('listening', '出错：' + msg.error);
+            setTimeout(() => {
+                if (state.voiceActive) {
+                    updateCallStatus('listening', '正在听...');
+                    startListening();
+                }
+            }, 2000);
+            break;
+
+        case 'pong':
+            break;
+    }
+}
+
+function finishVoiceTurn() {
+    dom.voiceWaveBar.classList.remove('speaking');
+    dom.voiceStatusText.classList.remove('speaking');
+    dom.callUserText.textContent = '';
+    if (state.voiceActive) {
+        updateCallStatus('listening', '正在听...');
+        startListening();
+    }
+}
+
+// ============================================================
+// 音频播放队列
+// ============================================================
+function playNextInQueue() {
+    if (state.audioQueue.length === 0) {
+        state.isPlayingAudio = false;
+        dom.voiceWaveBar.classList.remove('speaking');
+        dom.voiceStatusText.classList.remove('speaking');
+        return;
+    }
+
+    state.isPlayingAudio = true;
+    const item = state.audioQueue.shift();
+    const audioUrl = URL.createObjectURL(item.blob);
+
+    state.currentAudio = audioUrl;
+    dom.voiceAudio.src = audioUrl;
+    dom.voiceAudio.onended = () => {
+        URL.revokeObjectURL(audioUrl);
+        state.currentAudio = null;
+        playNextInQueue();
+    };
+    dom.voiceAudio.onerror = () => {
+        URL.revokeObjectURL(audioUrl);
+        state.currentAudio = null;
+        playNextInQueue();
+    };
+    dom.voiceAudio.play().catch(() => {
+        URL.revokeObjectURL(audioUrl);
+        state.currentAudio = null;
+        playNextInQueue();
+    });
+}
+
+function stopAllAudio() {
+    dom.voiceAudio.pause();
+    if (dom.voiceAudio.src) {
+        URL.revokeObjectURL(dom.voiceAudio.src);
+        dom.voiceAudio.src = '';
+    }
+    state.audioQueue = [];
+    state.isPlayingAudio = false;
+    state.currentAudio = null;
+}
+
+/**
+ * 打断：停止当前 TTS 播放 + LLM 生成，立即开始新录音
+ */
+function interruptVoice() {
+    if (!state.voiceActive) return;
+
+    console.log('[Voice] ⏸ 用户打断');
+    state.interruptRequested = true;
+    stopAllAudio();
+    sendWsMessage({ type: 'interrupt' });
+    updateCallStatus('listening', '正在听...');
+    dom.callUserText.textContent = '';
+
+    stopListening();
+    setTimeout(() => {
+        if (state.voiceActive) startListening();
+    }, 300);
+}
+
+// ============================================================
+// 录音 + VAD
+// ============================================================
 function startListening() {
     if (!state.audioStream) return;
 
     state.voiceListening = true;
     state.audioChunks = [];
+    state.interruptRequested = false;
+    dom.callUserText.textContent = '';
 
-    // 检测支持的 MIME 类型
     let mimeType = 'audio/webm';
     if (!MediaRecorder.isTypeSupported('audio/webm')) {
         mimeType = 'audio/mp4';
@@ -604,27 +1187,20 @@ function startListening() {
 
         const audioBlob = new Blob(state.audioChunks, { type: mimeType || 'audio/webm' });
 
-        // 转换为 WAV 格式
         try {
             const wavBlob = await convertToWav(audioBlob);
-            await processVoiceInput(wavBlob);
+            await sendAudioToServer(wavBlob);
         } catch (e) {
-            console.error('音频转换失败：', e);
-            // 如果转换失败，尝试直接发送原始格式
-            await processVoiceInput(audioBlob);
+            console.error('[Voice] 音频转换失败：', e);
+            await sendAudioToServer(audioBlob);
         }
     };
 
     state.mediaRecorder.start();
     dom.voiceCallBtn.classList.add('listening');
-
-    // 设置自动停止：检测静音 2 秒后自动停止
     startSilenceDetection();
 }
 
-/**
- * 停止录音
- */
 function stopListening() {
     state.voiceListening = false;
     stopSilenceDetection();
@@ -636,8 +1212,106 @@ function stopListening() {
 }
 
 /**
- * 静音检测（基于音量）
+ * 通过 WebSocket 发送音频到服务器
  */
+async function sendAudioToServer(audioBlob) {
+    if (!state.voiceActive) return;
+    if (!state.wsConnected) {
+        console.warn('[WS] 未连接，无法发送音频');
+        // 降级到 HTTP
+        await processVoiceInputHttp(audioBlob);
+        return;
+    }
+
+    updateCallStatus('processing', '识别中...');
+
+    const reader = new FileReader();
+    reader.onload = () => {
+        const base64 = reader.result.split(',')[1];
+        sendWsMessage({
+            type: 'audio',
+            data: base64,
+            language: 'zh',
+        });
+    };
+    reader.readAsDataURL(audioBlob);
+}
+
+/**
+ * HTTP 降级（WebSocket 不可用时）
+ */
+async function processVoiceInputHttp(audioBlob) {
+    if (!state.voiceActive) return;
+
+    updateCallStatus('processing', '识别中...');
+
+    const formData = new FormData();
+    formData.append('audio', audioBlob, 'recording.wav');
+    formData.append('language', 'zh');
+
+    let aiBubble = null;
+    let aiFullText = '';
+
+    try {
+        const resp = await fetch('/api/voice/chat-stream', { method: 'POST', body: formData });
+        if (!resp.ok) {
+            let errMsg = '服务器错误';
+            try { const errData = await resp.json(); errMsg = errData.error || errMsg; } catch (_) { }
+            updateCallStatus('listening', '出错：' + errMsg);
+            setTimeout(() => { if (state.voiceActive) startListening(); }, 2000);
+            return;
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                let data = null;
+                try { data = JSON.parse(line.slice(6)); } catch (_) { continue; }
+
+                if (data.type === 'user' && data.text) {
+                    addMessage('user', data.text);
+                    dom.callUserText.textContent = data.text;
+                    updateCallStatus('processing', '思考中...');
+                }
+                if (data.type === 'sentence') {
+                    if (data.text) {
+                        aiFullText += data.text;
+                        if (!aiBubble) { aiBubble = createMessageBubble('ai', ''); dom.chatMessages.appendChild(aiBubble); }
+                        aiBubble.querySelector('.message-bubble').textContent = aiFullText;
+                        scrollToBottom();
+                    }
+                    if (data.audio) {
+                        const ab = base64ToBlob(data.audio, 'audio/wav');
+                        state.audioQueue.push({ blob: ab });
+                        if (!state.isPlayingAudio) playNextInQueue();
+                        updateCallStatus('speaking', '正在说...');
+                    }
+                }
+                if (data.type === 'done') {
+                    if (!state.isPlayingAudio && state.audioQueue.length === 0) finishVoiceTurn();
+                }
+            }
+        }
+    } catch (e) {
+        console.error('[Voice HTTP] 错误:', e);
+        updateCallStatus('listening', '连接中断');
+        setTimeout(() => { if (state.voiceActive) startListening(); }, 2000);
+    }
+}
+
+// ============================================================
+// 静音检测 (VAD)
+// ============================================================
 let _silenceTimer = null;
 let _audioAnalyser = null;
 let _analyserInterval = null;
@@ -654,26 +1328,21 @@ function startSilenceDetection() {
 
         const bufferLength = _audioAnalyser.frequencyBinCount;
         const dataArray = new Uint8Array(bufferLength);
-
-        // 检测静音：如果音量持续低于阈值，自动停止录音
         const SILENCE_THRESHOLD = 25;
-        const SILENCE_DURATION = 2000; // 2秒静音后自动发送
+        const SILENCE_DURATION = 2000;
 
         _analyserInterval = setInterval(() => {
             if (!state.voiceListening) return;
-
             _audioAnalyser.getByteFrequencyData(dataArray);
             let sum = 0;
-            for (let i = 0; i < bufferLength; i++) {
-                sum += dataArray[i];
-            }
+            for (let i = 0; i < bufferLength; i++) sum += dataArray[i];
             const avgVolume = sum / bufferLength;
 
             if (avgVolume < SILENCE_THRESHOLD) {
                 if (!_silenceTimer) {
                     _silenceTimer = setTimeout(() => {
-                        if (state.voiceListening && state.mediaRecorder.state === 'recording') {
-                            console.log('[Voice] 检测到静音，自动停止录音');
+                        if (state.voiceListening && state.mediaRecorder && state.mediaRecorder.state === 'recording') {
+                            console.log('[Voice] 静音检测，自动停止录音');
                             stopListening();
                         }
                     }, SILENCE_DURATION);
@@ -686,8 +1355,7 @@ function startSilenceDetection() {
             }
         }, 200);
     } catch (e) {
-        console.log('[Voice] 静音检测不可用：', e.message);
-        // 不支持时，每 6 秒自动停止一次
+        console.log('[Voice] VAD 不可用:', e.message);
         _silenceTimer = setTimeout(() => {
             if (state.voiceListening && state.mediaRecorder && state.mediaRecorder.state === 'recording') {
                 stopListening();
@@ -697,14 +1365,8 @@ function startSilenceDetection() {
 }
 
 function stopSilenceDetection() {
-    if (_silenceTimer) {
-        clearTimeout(_silenceTimer);
-        _silenceTimer = null;
-    }
-    if (_analyserInterval) {
-        clearInterval(_analyserInterval);
-        _analyserInterval = null;
-    }
+    if (_silenceTimer) { clearTimeout(_silenceTimer); _silenceTimer = null; }
+    if (_analyserInterval) { clearInterval(_analyserInterval); _analyserInterval = null; }
     if (state.audioContext && state.audioContext.state !== 'closed') {
         state.audioContext.close().catch(() => {});
         state.audioContext = null;
@@ -712,70 +1374,51 @@ function stopSilenceDetection() {
     _audioAnalyser = null;
 }
 
-/**
- * 将浏览器录音 Blob 转换为 WAV 格式
- */
+// ============================================================
+// 音频编码工具
+// ============================================================
 async function convertToWav(audioBlob) {
-    // 使用 AudioContext 解码并重新编码为 WAV
     const arrayBuffer = await audioBlob.arrayBuffer();
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-
-    // 提取单声道数据并重采样到 16kHz
     const targetSampleRate = 16000;
     const offlineCtx = new OfflineAudioContext(
-        1,
-        Math.ceil(audioBuffer.duration * targetSampleRate),
-        targetSampleRate
+        1, Math.ceil(audioBuffer.duration * targetSampleRate), targetSampleRate
     );
     const source = offlineCtx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(offlineCtx.destination);
     source.start(0);
-
     const renderedBuffer = await offlineCtx.startRendering();
     const pcmData = renderedBuffer.getChannelData(0);
-
-    // 编码为 WAV
     const wavBuffer = encodeWav(pcmData, targetSampleRate);
     audioCtx.close();
     return new Blob([wavBuffer], { type: 'audio/wav' });
 }
 
-/**
- * 将 PCM 数据编码为 WAV 格式
- */
 function encodeWav(samples, sampleRate) {
-    const numChannels = 1;
-    const bitsPerSample = 16;
+    const numChannels = 1, bitsPerSample = 16;
     const byteRate = sampleRate * numChannels * bitsPerSample / 8;
     const blockAlign = numChannels * bitsPerSample / 8;
     const dataSize = samples.length * blockAlign;
     const bufferSize = 44 + dataSize;
-
     const buffer = new ArrayBuffer(bufferSize);
     const view = new DataView(buffer);
 
-    // RIFF header
     writeString(view, 0, 'RIFF');
     view.setUint32(4, bufferSize - 8, true);
     writeString(view, 8, 'WAVE');
-
-    // fmt chunk
     writeString(view, 12, 'fmt ');
     view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true); // PCM
+    view.setUint16(20, 1, true);
     view.setUint16(22, numChannels, true);
     view.setUint32(24, sampleRate, true);
     view.setUint32(28, byteRate, true);
     view.setUint16(32, blockAlign, true);
     view.setUint16(34, bitsPerSample, true);
-
-    // data chunk
     writeString(view, 36, 'data');
     view.setUint32(40, dataSize, true);
 
-    // Write samples
     let offset = 44;
     for (let i = 0; i < samples.length; i++) {
         const s = Math.max(-1, Math.min(1, samples[i]));
@@ -783,7 +1426,6 @@ function encodeWav(samples, sampleRate) {
         view.setInt16(offset, intSample, true);
         offset += 2;
     }
-
     return buffer;
 }
 
@@ -793,225 +1435,6 @@ function writeString(view, offset, str) {
     }
 }
 
-/**
- * 处理语音输入：SSE 流式连接 /api/voice/chat-stream
- *
- * 新流程（低延迟）：
- *   上传音频 → ASR（<100ms）
- *   → LLM 流式输出 → 分句切割 → 逐句 TTS 合成
- *   → SSE 实时推送 {text + audio}，前端边收边播
- *
- * 首句延迟目标：~2s（vs 旧流程 8s+）
- */
-async function processVoiceInput(audioBlob) {
-    if (!state.voiceActive) return;
-
-    updateVoiceStatus('processing', '识别中...');
-
-    const formData = new FormData();
-    formData.append('audio', audioBlob, 'recording.wav');
-    formData.append('language', 'zh');
-
-    // ---- 音频播放队列 ----
-    const audioQueue = [];
-    let isPlayingAudio = false;
-
-    function playNextAudio() {
-        if (audioQueue.length === 0) {
-            isPlayingAudio = false;
-            dom.voiceWave.classList.remove('speaking');
-            dom.voiceStatusText.classList.remove('speaking');
-
-            // 队列播完且 SSE 已结束 → 恢复监听
-            if (state.voiceActive && _streamEnded) {
-                updateVoiceStatus('listening', '正在听...');
-                startListening();
-            }
-            return;
-        }
-
-        isPlayingAudio = true;
-        dom.voiceWave.classList.add('speaking');
-        dom.voiceStatusText.classList.add('speaking');
-        updateVoiceStatus('speaking', '正在说...');
-
-        const item = audioQueue.shift();
-        const audioUrl = URL.createObjectURL(item.blob);
-
-        dom.voiceAudio.src = audioUrl;
-        dom.voiceAudio.onended = () => {
-            URL.revokeObjectURL(audioUrl);
-            playNextAudio();
-        };
-        dom.voiceAudio.onerror = () => {
-            URL.revokeObjectURL(audioUrl);
-            playNextAudio();
-        };
-        dom.voiceAudio.play().catch(() => {
-            URL.revokeObjectURL(audioUrl);
-            playNextAudio();
-        });
-    }
-
-    // ---- SSE 流式读取 ----
-    let aiBubble = null;
-    let aiFullText = '';
-    let userText = '';
-    let _streamEnded = false;
-
-    try {
-        const resp = await fetch('/api/voice/chat-stream', {
-            method: 'POST',
-            body: formData,
-        });
-
-        if (!resp.ok) {
-            let errMsg = '服务器错误';
-            try {
-                const errData = await resp.json();
-                errMsg = errData.error || errMsg;
-            } catch (_) { /* ignore */ }
-            updateVoiceStatus('listening', '出错：' + errMsg);
-            setTimeout(() => { if (state.voiceActive) startListening(); }, 2000);
-            return;
-        }
-
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-                let data = null;
-                try {
-                    data = JSON.parse(line.slice(6));
-                } catch (_) { continue; }
-
-                switch (data.type) {
-                    case 'user':
-                        // ASR 识别结果
-                        userText = data.text || '';
-                        if (userText) {
-                            addMessage('user', userText);
-                        }
-                        updateVoiceStatus('processing', '思考中...');
-                        break;
-
-                    case 'sentence':
-                        // AI 分句文本 + 可选音频
-                        if (data.text) {
-                            aiFullText += data.text;
-
-                            if (!aiBubble) {
-                                aiBubble = createMessageBubble('ai', '');
-                                dom.chatMessages.appendChild(aiBubble);
-                            }
-                            aiBubble.querySelector('.message-bubble').textContent = aiFullText;
-                            scrollToBottom();
-                        }
-
-                        if (data.audio) {
-                            const audioBlob = base64ToBlob(data.audio, 'audio/wav');
-                            audioQueue.push({ blob: audioBlob });
-                            if (!isPlayingAudio) {
-                                playNextAudio();
-                            }
-                        }
-                        break;
-
-                    case 'error':
-                        console.error('[Voice] 流式错误：', data.error);
-                        break;
-
-                    case 'done':
-                        _streamEnded = true;
-                        if (data.name) state.aiName = data.name;
-                        // 如果无音频且无文本，快速恢复监听
-                        if (!isPlayingAudio && audioQueue.length === 0) {
-                            if (state.voiceActive) {
-                                updateVoiceStatus('listening', '正在听...');
-                                startListening();
-                            }
-                        }
-                        // 否则等待 playNextAudio 自然触发恢复
-                        break;
-                }
-            }
-        }
-
-        // SSE 连接关闭但 done 可能未收到（网络波动）
-        if (!_streamEnded) {
-            _streamEnded = true;
-            if (!isPlayingAudio && audioQueue.length === 0) {
-                if (state.voiceActive) {
-                    updateVoiceStatus('listening', '正在听...');
-                    startListening();
-                }
-            }
-        }
-
-    } catch (e) {
-        console.error('[Voice] SSE 连接失败：', e);
-        _streamEnded = true;
-        if (aiFullText && !aiBubble) {
-            addMessage('ai', aiFullText);
-        }
-        if (!isPlayingAudio && audioQueue.length === 0) {
-            updateVoiceStatus('listening', '连接中断');
-            setTimeout(() => { if (state.voiceActive) startListening(); }, 2000);
-        }
-    }
-}
-
-/**
- * 音频播放结束回调
- */
-function onAudioPlaybackEnded() {
-    state.voiceSpeaking = false;
-    dom.voiceWave.classList.remove('speaking');
-    dom.voiceStatusText.classList.remove('speaking');
-
-    // 清理 audio URL
-    if (dom.voiceAudio.src) {
-        URL.revokeObjectURL(dom.voiceAudio.src);
-        dom.voiceAudio.src = '';
-    }
-
-    if (state.voiceActive) {
-        updateVoiceStatus('listening', '正在听...');
-        startListening();
-    }
-}
-
-/**
- * 更新语音状态 UI
- */
-function updateVoiceStatus(state_type, text) {
-    dom.voiceStatusText.textContent = text;
-
-    if (state_type === 'listening') {
-        dom.voiceStatusText.className = 'voice-text';
-        dom.voiceWave.classList.remove('speaking');
-    } else if (state_type === 'speaking') {
-        dom.voiceStatusText.className = 'voice-text speaking';
-        dom.voiceWave.classList.add('speaking');
-    } else if (state_type === 'processing') {
-        dom.voiceStatusText.className = 'voice-text';
-        dom.voiceWave.classList.remove('speaking');
-    }
-}
-
-/**
- * Base64 转 Blob
- */
 function base64ToBlob(base64, mimeType) {
     const byteChars = atob(base64);
     const byteArrays = [];
@@ -1024,6 +1447,33 @@ function base64ToBlob(base64, mimeType) {
         byteArrays.push(new Uint8Array(byteNumbers));
     }
     return new Blob(byteArrays, { type: mimeType });
+}
+
+function onAudioPlaybackEnded() {
+    state.voiceSpeaking = false;
+    dom.voiceWaveBar.classList.remove('speaking');
+    dom.voiceStatusText.classList.remove('speaking');
+
+    if (dom.voiceAudio.src) {
+        URL.revokeObjectURL(dom.voiceAudio.src);
+        dom.voiceAudio.src = '';
+    }
+
+    if (state.voiceActive && !state.isPlayingAudio && state.audioQueue.length === 0) {
+        updateVoiceStatus('listening', '正在听...');
+        startListening();
+    }
+}
+
+function updateVoiceStatus(statusType, text) {
+    dom.voiceStatusText.textContent = text;
+    dom.voiceStatusText.className = 'voice-text';
+    if (statusType === 'speaking') {
+        dom.voiceStatusText.classList.add('speaking');
+        dom.voiceWaveBar.classList.add('speaking');
+    } else {
+        dom.voiceWaveBar.classList.remove('speaking');
+    }
 }
 
 // ============================================================

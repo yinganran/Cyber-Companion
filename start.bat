@@ -1,8 +1,9 @@
 @echo off
 chcp 65001 >nul
-title 赛博女友 - AI伴侣
+title 痞老板的凯伦
 echo ========================================
-echo    赛博女友 - AI伴侣
+echo    痞老板的凯伦
+echo    质疑痞老板，理解痞老板，成为痞老板
 echo ========================================
 echo.
 
@@ -19,11 +20,16 @@ set VOXCPM2_MODEL_PATH=C:\Users\15123\.cache\huggingface\hub\models--openbmb--Vo
 :: set VOXCPM2_REF_AUDIO=C:\path\to\voice_ref.wav
 :: set VOXCPM2_REF_TEXT=参考音频对应文本内容
 
+:: 阿里云 CosyVoice 云端 TTS（可选，不设置则使用本地 VoxCPM2）
+:: set DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+:: set COSYVOICE_VOICE=longjiao
+
 echo 正在检查依赖...
 pip install -r requirements.txt --quiet 2>nul
 echo.
 echo 正在启动服务器...
 echo 访问地址: http://localhost:5000
+echo WebSocket: ws://localhost:5000/ws/voice
 echo.
 echo 请确保 Ollama 已启动:
 echo   ollama serve

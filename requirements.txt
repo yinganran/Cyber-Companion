@@ -1,16 +1,18 @@
 flask>=3.0.0
 flask-cors>=4.0.0
+flask-sock>=0.6.0        # WebSocket 支持（语音实时流式）
 requests>=2.31.0
 easyocr>=1.7.0
 Pillow>=10.0.0
-# 语音通话 (SenseVoiceSmall + VoxCPM2)
+# 语音通话 (SenseVoiceSmall ASR + VoxCPM2 TTS + Aliyun CosyVoice TTS)
 funasr>=1.0.0
-voxcpm              # VoxCPM2 TTS 专用包
+voxcpm              # VoxCPM2 TTS 专用包（本地）
+dashscope>=1.20.0    # 阿里云 CosyVoice TTS（云端龙娇语音）
 torch>=2.0.0
 torchaudio>=2.0.0
 numpy>=1.24.0
+scipy>=1.10.0        # 音频重采样
 # 可选依赖:
-# scipy>=1.10.0      # 音频重采样
 # 如需 GPU 加速 (RTX 50 系列 Blackwell 需要 CUDA 13.0+):
 # pip install torch torchaudio --index-url https://download.pytorch.org/whl/nightly/cu130 --pre
 # 常规 GPU (RTX 40 系列及以下):

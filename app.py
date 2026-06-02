@@ -1,15 +1,16 @@
-import os, json, re, uuid
+import os, json, re, uuid, time, threading, logging
 from datetime import datetime
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify, Response, send_file
+from flask import Flask, render_template, request, jsonify, Response
 from flask_cors import CORS
+from flask_sock import Sock
 from PIL import Image
 import requests
 import voice as voice_module
 
 # Config
-OLLAMA_API = "http://localhost:11434/api"
-MODEL_NAME = "qwen2.5:7b-instruct"
+OLLAMA_API = os.environ.get("OLLAMA_API", "http://localhost:11434/api")
+MODEL_NAME = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct")
 DEFAULT_STYLE = "温柔体贴，善解人意，喜欢用简短自然的句子聊天。"
 RELATIONSHIP_CONTEXT = "你正在和男朋友聊天，你们是亲密的恋爱关系。"
 
@@ -19,6 +20,7 @@ AVATAR_DIR = UPLOAD_DIR / "avatars"
 DATA_DIR = BASE_DIR / "data"
 PROFILES_FILE = DATA_DIR / "profiles.json"
 CHAT_HISTORY_FILE = DATA_DIR / "chat_history.json"
+SETTINGS_FILE = DATA_DIR / "settings.json"
 
 for d in [UPLOAD_DIR, AVATAR_DIR, DATA_DIR]:
     d.mkdir(parents=True, exist_ok=True)
@@ -26,6 +28,10 @@ for d in [UPLOAD_DIR, AVATAR_DIR, DATA_DIR]:
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "ai-ban-secret-key-2024")
 CORS(app)
+sock = Sock(app)
+
+log = logging.getLogger("werkzeug")
+log.setLevel(logging.WARNING)
 
 # JSON helpers
 def load_json(path, default=None):
@@ -53,6 +59,44 @@ def get_chat_history():
 
 def save_chat_history(history):
     save_json(CHAT_HISTORY_FILE, history)
+
+_settings_cache = None
+_settings_cache_time = 0
+
+def get_settings():
+    """获取应用设置（5秒缓存，避免语音聊天时逐句读盘）"""
+    global _settings_cache, _settings_cache_time
+    now = time.time()
+    if _settings_cache is not None and (now - _settings_cache_time) < 5:
+        return _settings_cache
+    defaults = {
+        "ollama_url": OLLAMA_API,
+        "model_name": MODEL_NAME,
+        "tts_provider": "cosyvoice",
+        "cosyvoice_api_key": voice_module.COSYVOICE_API_KEY,
+        "cosyvoice_voice": voice_module.COSYVOICE_VOICE,
+        "cosyvoice_volume": voice_module.COSYVOICE_VOLUME,
+        "cosyvoice_speech_rate": voice_module.COSYVOICE_SPEECH_RATE,
+        "cosyvoice_pitch_rate": voice_module.COSYVOICE_PITCH_RATE,
+        "asr_model_path": voice_module.SENSEVOICE_MODEL_PATH,
+        "voxcpm2_model_path": voice_module.VOXCPM2_HUB_PATH,
+    }
+    saved = load_json(SETTINGS_FILE, {})
+    defaults.update(saved)
+    _settings_cache = defaults
+    _settings_cache_time = now
+    return defaults
+
+def _clear_settings_cache():
+    global _settings_cache, _settings_cache_time
+    _settings_cache = None
+    _settings_cache_time = 0
+
+def save_settings(settings_data):
+    settings = load_json(SETTINGS_FILE, {})
+    settings.update(settings_data)
+    save_json(SETTINGS_FILE, settings)
+    _clear_settings_cache()
 
 # ---------------------------------------------------------------------------
 # Ollama API
@@ -244,6 +288,170 @@ def _save_learning_result(style_analysis, raw_text):
         "screenshot_count": len(existing_texts)
     })
 
+# ============================================================
+# Shared: sentence-split generator from Ollama streaming response
+# ============================================================
+def _iter_sentences(resp, cancel_event=None):
+    """从 Ollama 流式响应逐句切分，yield (sentence, full_text_so_far)"""
+    full = ""
+    buf = ""
+    for line in resp.iter_lines():
+        if cancel_event and cancel_event.is_set():
+            return
+        if not line:
+            continue
+        try:
+            chunk = json.loads(line.decode("utf-8"))
+        except json.JSONDecodeError:
+            continue
+        content = chunk.get("message", {}).get("content", "")
+        if not content:
+            continue
+        full += content
+        buf += content
+
+        while True:
+            if cancel_event and cancel_event.is_set():
+                return
+            match = re.search(r'[。！？\n～…]', buf)
+            if not match:
+                if len(buf) > 60:
+                    comma = re.search(r'[，,]\s*', buf)
+                    end = comma.end() if (comma and comma.start() > 8) else 60
+                    sent = buf[:end].strip()
+                    buf = buf[end:]
+                else:
+                    break
+            else:
+                sent = buf[:match.end()].strip()
+                buf = buf[match.end():]
+            if sent:
+                yield sent, full
+
+    rem = buf.strip()
+    if rem:
+        yield rem, full
+
+
+# ============================================================
+# TTS dispatcher
+# ============================================================
+def _get_tts_provider():
+    settings = get_settings()
+    return settings.get("tts_provider", "cosyvoice")
+
+def tts_synthesize(text):
+    provider = _get_tts_provider()
+    if provider == "cosyvoice" and voice_module.cosyvoice_is_available():
+        try:
+            return voice_module.synthesize_cosyvoice(text)
+        except Exception as e:
+            print(f"[TTS] CosyVoice 失败，fallback VoxCPM2: {e}")
+    return voice_module.synthesize_speech(text, inference_timesteps=3, max_len=512)
+
+def tts_synthesize_streaming(text):
+    provider = _get_tts_provider()
+    if provider == "cosyvoice" and voice_module.cosyvoice_is_available():
+        try:
+            yield from voice_module.synthesize_cosyvoice_streaming(text)
+            return
+        except Exception as e:
+            print(f"[TTS] CosyVoice 流式失败，fallback VoxCPM2: {e}")
+    audio = voice_module.synthesize_speech(text, inference_timesteps=3, max_len=512)
+    yield audio
+
+# ============================================================
+# WebSocket 实时语音通话
+# ============================================================
+@sock.route("/ws/voice")
+def voice_websocket(ws):
+    cancel_event = threading.Event()
+
+    try:
+        while True:
+            raw = ws.receive(timeout=3600)
+            if raw is None:
+                break
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = msg.get("type", "")
+
+            if msg_type == "interrupt":
+                print("[WS] ⏸ 用户打断")
+                cancel_event.set()
+                cancel_event = threading.Event()
+                ws.send(json.dumps({"type": "interrupted"}))
+                continue
+
+            if msg_type == "audio":
+                import base64
+                audio_b64 = msg.get("data", "")
+                if not audio_b64:
+                    continue
+
+                audio_data = base64.b64decode(audio_b64)
+                if not voice_module.validate_wav(audio_data):
+                    ws.send(json.dumps({"type": "error", "error": "无效音频格式"}))
+                    continue
+
+                audio_data = voice_module.convert_wav_sample_rate(audio_data)
+                language = msg.get("language", "zh")
+
+                try:
+                    asr_r = voice_module.transcribe_audio(audio_data, language)
+                except Exception as e:
+                    ws.send(json.dumps({"type": "error", "error": f"ASR失败: {e}"}))
+                    continue
+
+                user_text = asr_r.get("text", "").strip()
+                if not user_text:
+                    ws.send(json.dumps({"type": "user_text", "text": "", "message": "未识别到语音"}))
+                    continue
+
+                ws.send(json.dumps({"type": "user_text", "text": user_text}))
+
+                system_prompt, messages, custom_name = _build_chat_context()
+                messages.append({"role": "user", "content": user_text})
+
+                try:
+                    resp = call_ollama(messages, stream=True, system_prompt=system_prompt)
+                except Exception as e:
+                    ws.send(json.dumps({"type": "error", "error": f"LLM失败: {e}"}))
+                    continue
+
+                full_response = ""
+                for sentence, full_response in _iter_sentences(resp, cancel_event):
+                    ws.send(json.dumps({"type": "ai_text", "text": sentence}))
+                    try:
+                        for audio_chunk in tts_synthesize_streaming(sentence):
+                            if cancel_event.is_set():
+                                break
+                            ab64 = base64.b64encode(audio_chunk).decode("utf-8")
+                            ws.send(json.dumps({"type": "tts_audio", "data": ab64}))
+                    except Exception as e:
+                        print(f"[WS] TTS分句失败: {e}")
+
+                history = get_chat_history()
+                history.append({
+                    "user": user_text, "ai": full_response,
+                    "timestamp": datetime.now().isoformat()
+                })
+                save_chat_history(history)
+                ws.send(json.dumps({"type": "done", "name": custom_name, "full_text": full_response}))
+
+            elif msg_type == "ping":
+                ws.send(json.dumps({"type": "pong"}))
+
+    except Exception as e:
+        print(f"[WS] 异常: {e}")
+    finally:
+        cancel_event.set()
+        print("[WS] 连接关闭")
+
+
 # Routes: Voice API
 @app.route("/api/voice/asr", methods=["POST"])
 def voice_asr():
@@ -276,7 +484,7 @@ def voice_asr():
 
 @app.route("/api/voice/tts", methods=["POST"])
 def voice_tts():
-    """语音合成：接收文字，返回音频"""
+    """语音合成：接收文字，返回音频（自动选择 TTS 提供商）"""
     data = request.get_json()
     if not data:
         return jsonify({"error": "请提供 JSON 数据"}), 400
@@ -286,7 +494,7 @@ def voice_tts():
         return jsonify({"error": "文本不能为空"}), 400
 
     try:
-        audio_bytes = voice_module.synthesize_speech(text)
+        audio_bytes = tts_synthesize(text)
         return Response(
             audio_bytes,
             mimetype="audio/wav",
@@ -357,7 +565,7 @@ def voice_chat():
 
     # Step 3: TTS
     try:
-        audio_bytes = voice_module.synthesize_speech(ai_response)
+        audio_bytes = tts_synthesize(ai_response)
         import base64
         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
         return jsonify({
@@ -411,9 +619,7 @@ def voice_tts_stream():
         import base64
         for chunk in chunks:
             try:
-                audio_bytes = voice_module.synthesize_speech(
-                    chunk, inference_timesteps=3, max_len=512
-                )
+                audio_bytes = tts_synthesize(chunk)
                 audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
                 yield f"data: {json.dumps({'text': chunk, 'audio': audio_b64})}\n\n"
             except Exception as e:
@@ -529,11 +735,7 @@ def voice_chat_stream():
 
                     # 分句 TTS（语音通话优化参数）
                     try:
-                        audio_bytes = voice_module.synthesize_speech(
-                            sentence,
-                            inference_timesteps=3,
-                            max_len=512,
-                        )
+                        audio_bytes = tts_synthesize(sentence)
                         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
                         yield f"data: {json.dumps({'type': 'sentence', 'text': sentence, 'audio': audio_b64})}\n\n"
                     except Exception as e:
@@ -544,9 +746,7 @@ def voice_chat_stream():
             remaining = current_buffer.strip()
             if remaining:
                 try:
-                    audio_bytes = voice_module.synthesize_speech(
-                        remaining, inference_timesteps=3, max_len=512
-                    )
+                    audio_bytes = tts_synthesize(remaining)
                     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
                     yield f"data: {json.dumps({'type': 'sentence', 'text': remaining, 'audio': audio_b64})}\n\n"
                 except Exception as e:
@@ -592,22 +792,64 @@ def voice_chat_stream():
     )
 
 
+@app.route("/api/voice/tts/test", methods=["POST"])
+def voice_tts_test():
+    """
+    测试 TTS 连接 / 试听音色。
+    前端传入 api_key + voice，后端临时切换配置进行测试，
+    不依赖是否已保存——输入框里的 Key 直接生效。
+    """
+    data = request.get_json() or {}
+    test_text = data.get("text", "你好，我是你的AI伴侣，很高兴认识你！")
+    provider = data.get("provider") or _get_tts_provider()
+
+    # 备份原始配置，用请求参数临时覆盖
+    orig_api_key = voice_module.COSYVOICE_API_KEY
+    orig_voice = voice_module.COSYVOICE_VOICE
+
+    try:
+        api_key = data.get("api_key", "").strip()
+        voice = data.get("voice", "").strip()
+
+        if api_key:
+            voice_module.set_cosyvoice_config(api_key=api_key)
+        if voice:
+            voice_module.set_cosyvoice_config(voice=voice)
+
+        if provider == "cosyvoice":
+            audio_bytes = voice_module.synthesize_cosyvoice(test_text)
+        else:
+            audio_bytes = voice_module.synthesize_speech(test_text, inference_timesteps=3, max_len=512)
+
+        import base64
+        return jsonify({
+            "success": True,
+            "audio": base64.b64encode(audio_bytes).decode("utf-8"),
+            "format": "wav",
+            "provider": provider,
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e), "provider": provider}), 500
+    finally:
+        voice_module.set_cosyvoice_config(api_key=orig_api_key, voice=orig_voice)
+
+
 @app.route("/api/voice/status", methods=["GET"])
 def voice_status():
-    """查询语音模块加载状态"""
+    """查询语音模块加载状态 + TTS 提供商信息"""
     try:
         status = voice_module.get_voice_status()
+        settings = get_settings()
+        status["tts_provider"] = settings.get("tts_provider", "cosyvoice")
         return jsonify({"success": True, **status})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-# Routes: Pages
 @app.route("/")
 def index():
     return render_template("index.html")
 
-# Routes: Chat API
 @app.route("/api/chat", methods=["POST"])
 def chat():
     data = request.get_json()
@@ -679,6 +921,68 @@ def chat_stream():
             "X-Accel-Buffering": "no",
         }
     )
+
+# ============================================================
+# Routes: Settings API
+# ============================================================
+@app.route("/api/settings", methods=["GET"])
+def api_get_settings():
+    settings = get_settings()
+    profile = get_profile()
+    return jsonify({
+        "success": True,
+        "settings": settings,
+        "profile": {
+            "name": profile.get("name", "小赛"),
+            "style_analysis": profile.get("style_analysis", ""),
+            "avatar_ai": profile.get("avatar_ai", ""),
+            "avatar_user": profile.get("avatar_user", ""),
+            "screenshot_count": profile.get("screenshot_count", 0),
+            "last_learned": profile.get("last_learned", ""),
+        },
+        "voice_status": voice_module.get_voice_status(),
+    })
+
+
+@app.route("/api/settings", methods=["POST"])
+def api_update_settings():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "请提供 JSON 数据"}), 400
+
+    model_config = {}
+    for key in ["ollama_url", "model_name", "tts_provider",
+                "cosyvoice_api_key", "cosyvoice_voice",
+                "cosyvoice_volume", "cosyvoice_speech_rate", "cosyvoice_pitch_rate",
+                "asr_model_path", "voxcpm2_model_path"]:
+        if key in data:
+            model_config[key] = data[key]
+
+    if model_config:
+        save_settings(model_config)
+
+    if "cosyvoice_api_key" in data:
+        voice_module.set_cosyvoice_config(api_key=data["cosyvoice_api_key"])
+    if "cosyvoice_voice" in data:
+        voice_module.set_cosyvoice_config(voice=data["cosyvoice_voice"])
+    if "cosyvoice_volume" in data:
+        voice_module.set_cosyvoice_config(volume=data["cosyvoice_volume"])
+    if "cosyvoice_speech_rate" in data:
+        voice_module.set_cosyvoice_config(speech_rate=data["cosyvoice_speech_rate"])
+    if "cosyvoice_pitch_rate" in data:
+        voice_module.set_cosyvoice_config(pitch_rate=data["cosyvoice_pitch_rate"])
+
+    if "name" in data:
+        save_profile({"name": data["name"].strip()})
+
+    global OLLAMA_API, MODEL_NAME
+    if "ollama_url" in data:
+        OLLAMA_API = data["ollama_url"].rstrip("/")
+    if "model_name" in data:
+        MODEL_NAME = data["model_name"]
+
+    return jsonify({"success": True, "message": "设置已更新"})
+
 
 # Routes: Screenshot Upload and Learning
 @app.route("/api/upload-screenshot", methods=["POST"])
@@ -820,6 +1124,7 @@ def api_update_profile():
 def reset_all():
     save_chat_history([])
     save_json(PROFILES_FILE, {})
+    save_json(SETTINGS_FILE, {})
     for f in AVATAR_DIR.glob("avatar_*"):
         f.unlink()
     return jsonify({"success": True, "message": "已重置所有数据"})
@@ -835,11 +1140,12 @@ def api_clear_history():
 
 # Startup
 if __name__ == "__main__":
-    print("=" * 50)
-    print("  赛博女友 - AI伴侣")
-    print(f"  对话模型: {MODEL_NAME}")
-    print(f"  Ollama API: {OLLAMA_API}")
-    print("=" * 50)
+    print("=" * 55)
+    print("  痞老板的凯伦")
+    print("  质疑痞老板，理解痞老板，成为痞老板")
+    print(f"  LLM: {MODEL_NAME}  @  {OLLAMA_API}")
+    print(f"  TTS: {voice_module.COSYVOICE_MODEL}  (voice={voice_module.COSYVOICE_VOICE})")
+    print("=" * 55)
 
     # 预加载语音模型
     print("\n正在预加载语音模型，请稍候...\n")

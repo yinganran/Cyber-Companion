@@ -26,12 +26,26 @@ ASR_SAMPLE_RATE = 16000
 TTS_SAMPLE_RATE = 48000
 
 # ============================================================
+# CosyVoice 云端 TTS 配置（阿里云 DashScope / 百炼平台）
+# 模型: cosyvoice-v3-flash  +  音色: longxing_v3 (龙星)
+# ============================================================
+COSYVOICE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
+COSYVOICE_VOICE = os.environ.get("COSYVOICE_VOICE", "longxing_v3")
+COSYVOICE_MODEL = os.environ.get("COSYVOICE_MODEL", "cosyvoice-v3-flash")
+# 合成参数（参照 test.py）
+COSYVOICE_FORMAT = os.environ.get("COSYVOICE_FORMAT", "mp3")  # mp3 或 wav
+COSYVOICE_VOLUME = int(os.environ.get("COSYVOICE_VOLUME", "50"))
+COSYVOICE_SPEECH_RATE = float(os.environ.get("COSYVOICE_SPEECH_RATE", "1.0"))
+COSYVOICE_PITCH_RATE = float(os.environ.get("COSYVOICE_PITCH_RATE", "1.0"))
+
+# ============================================================
 # 模型实例（init_models() 中填充）
 # ============================================================
 _sense_voice_model = None      # FunASR AutoModel 实例
 _voxcpm2_model = None          # voxcpm.VoxCPM 实例
 _voxcpm2_real_path = None      # 解析后的 VoxCPM2 实际路径
 _voxcpm2_has_gpu = False       # VoxCPM2 是否使用 GPU
+_cosyvoice_available = False   # CosyVoice 云端 TTS 是否可用
 
 
 def _cuda_available():
@@ -117,14 +131,20 @@ def init_models():
     _voxcpm2_real_path = _resolve_voxcpm2_path()
     _init_tts()
 
+    # --- CosyVoice 云端 TTS ---
+    _init_cosyvoice()
+
     # --- 状态汇总 ---
     print("=" * 50)
     asr_ok = _sense_voice_model is not None
     tts_ok = _voxcpm2_model is not None
+    cosy_ok = _cosyvoice_available
     print(f"[Voice] ASR (SenseVoiceSmall): {'✓ 已加载' if asr_ok else '✗ 未加载'}  "
           f"设备: {'GPU' if gpu_ok else 'CPU'}")
     print(f"[Voice] TTS (VoxCPM2):       {'✓ 已加载' if tts_ok else '✗ 未加载（文字对话仍可用）'}  "
           f"设备: {'GPU' if _voxcpm2_has_gpu else 'CPU'}")
+    print(f"[Voice] TTS (CosyVoice云端): {'✓ 可用' if cosy_ok else '✗ 未配置 (设置 DASHSCOPE_API_KEY 以启用)'}  "
+          f"voice={COSYVOICE_VOICE}")
     if tts_ok and _voxcpm2_has_gpu:
         allocated = torch.cuda.memory_allocated(0) / 1024**3
         print(f"[Voice] GPU 显存占用: {allocated:.2f} GB")
@@ -398,6 +418,149 @@ def _write_wav(filepath, samples, sample_rate):
         wf.writeframes(samples.tobytes())
 
 
+def _pcm_to_wav_bytes(pcm_bytes, sample_rate):
+    """将原始 PCM bytes 封装为 WAV bytes（前端可直接播放）"""
+    samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+    buf = io.BytesIO()
+    _write_wav(buf, samples, sample_rate)
+    return buf.getvalue()
+
+
+def _ensure_wav_bytes(audio_data):
+    """统一转换为 WAV 格式供前端播放"""
+    if not audio_data:
+        return audio_data
+    if audio_data[:4] == b'RIFF':
+        return audio_data  # 已是 WAV
+    if audio_data[:2] in (b'\xff\xfb', b'\xff\xf3', b'\xff\xfa'):
+        # MP3：浏览器可播放，直接封装为 audio/mpeg
+        # 若需转 WAV，pip install pydub 后启用
+        try:
+            from pydub import AudioSegment
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tf:
+                tf.write(audio_data)
+                tmp = tf.name
+            seg = AudioSegment.from_mp3(tmp)
+            os.unlink(tmp)
+            buf = io.BytesIO()
+            seg.export(buf, format='wav')
+            return buf.getvalue()
+        except ImportError:
+            pass  # 无 pydub，返回原始 MP3（前端 <audio> 支持 MP3）
+    # 未知格式 / PCM → WAV
+    return _pcm_to_wav_bytes(audio_data, 48000)
+
+
+# ============================================================
+# CosyVoice 云端 TTS（阿里云 DashScope）— 流式合成
+# ============================================================
+def _init_cosyvoice():
+    """初始化 CosyVoice（使用百炼平台官方 API 端点）"""
+    global _cosyvoice_available
+    if not COSYVOICE_API_KEY:
+        print("[Voice] CosyVoice: DASHSCOPE_API_KEY 未设置，云端 TTS 不可用")
+        _cosyvoice_available = False
+        return False
+    try:
+        import dashscope
+        # 官方百炼平台 API 端点
+        dashscope.base_websocket_api_url = 'wss://dashscope.aliyuncs.com/api-ws/v1/inference'
+        dashscope.base_http_api_url = 'https://dashscope.aliyuncs.com/api/v1'
+        dashscope.api_key = COSYVOICE_API_KEY
+        _cosyvoice_available = True
+        print(f"[Voice] ✓ CosyVoice 云端 TTS 可用 (model={COSYVOICE_MODEL}, voice={COSYVOICE_VOICE})")
+        return True
+    except ImportError:
+        print("[Voice] ✗ dashscope 未安装，CosyVoice 不可用。pip install dashscope")
+        _cosyvoice_available = False
+        return False
+
+
+def cosyvoice_is_available():
+    """检查 CosyVoice 是否可用"""
+    return _cosyvoice_available and bool(COSYVOICE_API_KEY)
+
+
+def set_cosyvoice_config(api_key=None, voice=None, model=None,
+                         volume=None, speech_rate=None, pitch_rate=None):
+    """运行时更新 CosyVoice 配置"""
+    global COSYVOICE_API_KEY, COSYVOICE_VOICE, COSYVOICE_MODEL, _cosyvoice_available
+    global COSYVOICE_VOLUME, COSYVOICE_SPEECH_RATE, COSYVOICE_PITCH_RATE
+    if api_key is not None:
+        COSYVOICE_API_KEY = api_key
+    if voice is not None:
+        COSYVOICE_VOICE = voice
+    if model is not None:
+        COSYVOICE_MODEL = model
+    if volume is not None:
+        COSYVOICE_VOLUME = int(volume)
+    if speech_rate is not None:
+        COSYVOICE_SPEECH_RATE = float(speech_rate)
+    if pitch_rate is not None:
+        COSYVOICE_PITCH_RATE = float(pitch_rate)
+    if api_key is not None:
+        _init_cosyvoice()
+    return cosyvoice_is_available()
+
+
+def _create_cosyvoice_synthesizer():
+    """创建 CosyVoice 合成器（对齐 test.py 的完整参数）"""
+    import dashscope
+    from dashscope.audio.tts_v2 import SpeechSynthesizer, AudioFormat
+    dashscope.api_key = COSYVOICE_API_KEY
+
+    # 输出格式映射
+    fmt = AudioFormat.MP3_22050HZ_MONO_256KBPS  # test.py 的默认格式
+    if COSYVOICE_FORMAT == "wav":
+        fmt = AudioFormat.PCM_16000HZ_MONO_16BIT
+
+    return SpeechSynthesizer(
+        model=COSYVOICE_MODEL,
+        voice=COSYVOICE_VOICE,
+        format=fmt,
+        volume=COSYVOICE_VOLUME,
+        speech_rate=COSYVOICE_SPEECH_RATE,
+        pitch_rate=COSYVOICE_PITCH_RATE,
+    )
+
+
+def synthesize_cosyvoice(text):
+    """
+    CosyVoice 语音合成，返回 WAV bytes。
+    使用百炼平台官方 API：SpeechSynthesizer(model, voice).call(text)
+    """
+    if not cosyvoice_is_available():
+        raise Exception("CosyVoice 不可用，请先设置 DASHSCOPE_API_KEY")
+
+    syn = _create_cosyvoice_synthesizer()
+    audio_data = syn.call(text)
+
+    if audio_data is None:
+        raise Exception("CosyVoice 返回空，请检查 API Key 和模型名称")
+    if not audio_data:
+        raise Exception("CosyVoice 返回空音频")
+
+    return _ensure_wav_bytes(audio_data)
+
+
+def synthesize_cosyvoice_streaming(text):
+    """
+    CosyVoice 流式 TTS — v3.5-flash 使用 call() 获取全量音频作为单块返回。
+    配合后端逐句 TTS 调度（每句一个 call），体验与流式等效。
+    """
+    if not cosyvoice_is_available():
+        raise Exception("CosyVoice 不可用，请先设置 DASHSCOPE_API_KEY")
+
+    syn = _create_cosyvoice_synthesizer()
+    audio_data = syn.call(text)
+
+    if not audio_data:
+        raise Exception("CosyVoice 返回空音频")
+
+    yield _ensure_wav_bytes(audio_data)
+
+
 # ============================================================
 # 音频工具
 # ============================================================
@@ -447,4 +610,12 @@ def get_voice_status():
         "ref_audio": bool(VOXCPM2_REF_AUDIO),
         "cuda_available": _cuda_available(),
         "torch_version": _get_torch_version(),
+        # CosyVoice 状态
+        "cosyvoice_available": _cosyvoice_available,
+        "cosyvoice_voice": COSYVOICE_VOICE,
+        "cosyvoice_model": COSYVOICE_MODEL,
+        "cosyvoice_api_key_set": bool(COSYVOICE_API_KEY),
+        "cosyvoice_volume": COSYVOICE_VOLUME,
+        "cosyvoice_speech_rate": COSYVOICE_SPEECH_RATE,
+        "cosyvoice_pitch_rate": COSYVOICE_PITCH_RATE,
     }
