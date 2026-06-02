@@ -58,8 +58,8 @@ python app.py
 
 ```bash
 # Windows (start.bat 中已预配置)
-set SENSEVOICE_MODEL_PATH=C:\Users\15123\.cache\modelscope\hub\models\iic\SenseVoiceSmall
-set VOXCPM2_MODEL_PATH=C:\Users\15123\.cache\huggingface\hub\models--openbmb--VoxCPM2
+set SENSEVOICE_MODEL_PATH=C:\Users\###\.cache\modelscope\hub\models\iic\SenseVoiceSmall
+set VOXCPM2_MODEL_PATH=C:\Users\###\.cache\huggingface\hub\models--openbmb--VoxCPM2
 
 # CosyVoice 云端 TTS（可选，不设置则使用本地 VoxCPM2）
 set DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxx
