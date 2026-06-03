@@ -2,6 +2,20 @@
 // Cyber GF v2.0 — WebSocket 实时语音 + 设置面板
 // ============================================================
 
+// ============================================================
+// 前端日志 → 服务端 app.log（失败不影响 UI）
+// ============================================================
+function frontendLog(level, message) {
+    try {
+        fetch('/api/log', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ level, message }),
+            keepalive: true,
+        }).catch(() => {});
+    } catch (_) {}
+}
+
 // State
 const state = {
     aiName: '小赛',
@@ -29,6 +43,8 @@ const state = {
     callMuted: false,
     callStartTime: null,
     callTimerInterval: null,
+    // Voice reply toggle (文字输入 + AI 语音回复)
+    voiceReplyEnabled: false,
 };
 
 // DOM Elements
@@ -74,6 +90,7 @@ const dom = {
     closeLearnBtn: el('#closeLearnBtn'),
     // Voice
     voiceCallBtn: el('#voiceCallBtn'),
+    voiceReplyBtn: el('#voiceReplyBtn'),
     voiceStatus: el('#voiceStatus'),
     voiceStatusText: el('#voiceStatusText'),
     voiceWaveBar: el('#voiceWaveBar'),
@@ -85,15 +102,24 @@ const dom = {
     cfgOllamaUrl: el('#cfgOllamaUrl'),
     cfgModelName: el('#cfgModelName'),
     cfgTtsProvider: el('#cfgTtsProvider'),
+    // CosyVoice
+    cfgCosyvoiceApiUrl: el('#cfgCosyvoiceApiUrl'),
+    cfgCosyvoiceModel: el('#cfgCosyvoiceModel'),
     cfgCosyvoiceKey: el('#cfgCosyvoiceKey'),
     cfgCosyvoiceVoice: el('#cfgCosyvoiceVoice'),
     ttsVoiceGrid: el('#ttsVoiceGrid'),
-    cfgAsrEngine: el('#cfgAsrEngine'),
-    saveSettingsBtn: el('#saveSettingsBtn'),
-    settingsSaveStatus: el('#settingsSaveStatus'),
     cosyvoiceConfig: el('#cosyvoiceConfig'),
     testApiBtn: el('#testApiBtn'),
     apiTestStatus: el('#apiTestStatus'),
+    toggleApiKeyBtn: el('#toggleApiKeyBtn'),
+    // VoxCPM2
+    voxcpm2Config: el('#voxcpm2Config'),
+    cfgVoxcpm2Path: el('#cfgVoxcpm2Path'),
+    cfgVoxcpm2RefAudio: el('#cfgVoxcpm2RefAudio'),
+    // ASR
+    cfgAsrEngine: el('#cfgAsrEngine'),
+    saveSettingsBtn: el('#saveSettingsBtn'),
+    settingsSaveStatus: el('#settingsSaveStatus'),
     // Voice Call UI
     callOverlay: el('#callOverlay'),
     callMinimizeBtn: el('#callMinimizeBtn'),
@@ -101,8 +127,6 @@ const dom = {
     callAvatarImg: el('#callAvatarImg'),
     callAvatarRing: el('#callAvatarRing'),
     callName: el('#callName'),
-    callStatusLabel: el('#callStatusLabel'),
-    callUserText: el('#callUserText'),
     callInterruptBtn: el('#callInterruptBtn'),
     callEndBtn: el('#callEndBtn'),
     callMuteBtn: el('#callMuteBtn'),
@@ -110,6 +134,10 @@ const dom = {
     callFloatTimer: el('#callFloatTimer'),
     callFloatEndBtn: el('#callFloatEndBtn'),
     callFloatAvatarImg: el('#callFloatAvatarImg'),
+    callTitle: el('#callTitle'),
+    // Context menu
+    contextMenu: el('#contextMenu'),
+    ctxTranscribe: el('#ctxTranscribe'),
 };
 
 // ============================================================
@@ -156,19 +184,25 @@ async function loadAllSettings() {
         const s = data.settings;
         if (s.ollama_url) dom.cfgOllamaUrl.value = s.ollama_url;
         if (s.model_name) {
-            // 尝试匹配 select option，找不到则保留现有选择
             const opt = dom.cfgModelName.querySelector(`option[value="${s.model_name}"]`);
             if (opt) dom.cfgModelName.value = s.model_name;
         }
         if (s.tts_provider) dom.cfgTtsProvider.value = s.tts_provider;
+
+        // CosyVoice
+        if (s.cosyvoice_api_url) dom.cfgCosyvoiceApiUrl.value = s.cosyvoice_api_url;
+        if (s.cosyvoice_model) dom.cfgCosyvoiceModel.value = s.cosyvoice_model;
         if (s.cosyvoice_api_key) dom.cfgCosyvoiceKey.value = s.cosyvoice_api_key;
         if (s.cosyvoice_voice) {
             dom.cfgCosyvoiceVoice.value = s.cosyvoice_voice;
-            // 恢复语音卡片选中状态
             dom.ttsVoiceGrid.querySelectorAll('.tts-voice-card').forEach(c => {
                 c.classList.toggle('selected', c.dataset.voice === s.cosyvoice_voice);
             });
         }
+
+        // VoxCPM2
+        if (s.voxcpm2_model_path) dom.cfgVoxcpm2Path.value = s.voxcpm2_model_path;
+        if (s.voxcpm2_ref_audio) dom.cfgVoxcpm2RefAudio.value = s.voxcpm2_ref_audio;
 
         updateTtsProviderUI();
     } catch (e) {
@@ -179,6 +213,7 @@ async function loadAllSettings() {
 function updateTtsProviderUI() {
     const provider = dom.cfgTtsProvider.value;
     dom.cosyvoiceConfig.style.display = provider === 'cosyvoice' ? 'block' : 'none';
+    dom.voxcpm2Config.style.display = provider === 'voxcpm2' ? 'block' : 'none';
 }
 
 // ============================================================
@@ -227,6 +262,8 @@ function setupEventListeners() {
         dom.cfgCosyvoiceVoice.value = card.dataset.voice;
     });
 
+    // API Key 显示/隐藏
+    dom.toggleApiKeyBtn.addEventListener('click', toggleApiKeyVisibility);
     // API 测试按钮
     dom.testApiBtn.addEventListener('click', testApiConnection);
 
@@ -261,6 +298,7 @@ function setupEventListeners() {
 
     // Voice — WebSocket based
     dom.voiceCallBtn.addEventListener('click', toggleVoiceCall);
+    dom.voiceReplyBtn.addEventListener('click', toggleVoiceReply);
     dom.endVoiceBtn.addEventListener('click', endVoiceCall);
     dom.interruptBtn.addEventListener('click', interruptVoice);
     dom.voiceAudio.addEventListener('ended', onAudioPlaybackEnded);
@@ -271,6 +309,10 @@ function setupEventListeners() {
             closeSettings();
         }
     });
+
+    // 右键菜单：点击其他地方关闭
+    document.addEventListener('click', hideContextMenu);
+    dom.ctxTranscribe.addEventListener('click', handleContextTranscribe);
 }
 
 // ============================================================
@@ -279,6 +321,8 @@ function setupEventListeners() {
 async function sendMessage() {
     const message = dom.messageInput.value.trim();
     if (!message || state.isStreaming) return;
+
+    frontendLog('info', `[Chat] 发送文本消息: 「${message.substring(0, 80)}」`);
 
     // Clear input
     dom.messageInput.value = '';
@@ -291,6 +335,8 @@ async function sendMessage() {
     // Show typing indicator
     showTyping(true);
     state.isStreaming = true;
+
+    let fullResponse = '';
 
     try {
         // Use streaming API
@@ -323,6 +369,7 @@ async function sendMessage() {
                         if (data.error) {
                             aiBubble.querySelector('.message-bubble').textContent = '错误：' + data.error;
                         } else if (!data.done) {
+                            fullResponse += data.content;
                             aiBubble.querySelector('.message-bubble').textContent += data.content;
                             scrollToBottom();
                         }
@@ -338,6 +385,12 @@ async function sendMessage() {
         }
 
         scrollToBottom();
+
+        // ★ 语音回复模式：流式完成后获取 TTS 音频
+        if (state.voiceReplyEnabled && fullResponse.trim()) {
+            aiBubble.__voiceText = fullResponse;
+            await fetchTtsForBubble(aiBubble, fullResponse);
+        }
     } catch (e) {
         addMessage('ai', '抱歉，连接错误：' + e.message);
     } finally {
@@ -397,6 +450,196 @@ function createMessageBubble(role, content) {
     return row;
 }
 
+// ============================================================
+// Voice Reply Toggle（语音回复开关）
+// ============================================================
+function toggleVoiceReply() {
+    state.voiceReplyEnabled = !state.voiceReplyEnabled;
+    if (state.voiceReplyEnabled) {
+        dom.voiceReplyBtn.classList.add('active');
+        dom.voiceReplyBtn.title = '语音回复已开启：AI 会用语音回复你';
+        dom.messageInput.placeholder = '输入消息...（AI 将语音回复）';
+        frontendLog('info', '[VoiceReply] 🔊 语音回复已开启');
+    } else {
+        dom.voiceReplyBtn.classList.remove('active');
+        dom.voiceReplyBtn.title = '语音回复：AI 会用语音回复你';
+        dom.messageInput.placeholder = '输入消息...';
+        frontendLog('info', '[VoiceReply] 🔇 语音回复已关闭');
+    }
+}
+
+// ============================================================
+// TTS 获取 + 气泡转换
+// ============================================================
+async function fetchTtsForBubble(bubble, text) {
+    const bubbleEl = bubble.querySelector('.message-bubble');
+    const originalText = text;
+
+    // 替换文字为加载状态
+    bubbleEl.innerHTML = '<div class="voice-bubble"><div class="voice-waveform" style="justify-content:center;align-items:center;height:32px;"><span style="font-size:12px;color:var(--text-muted);">🔊 语音生成中...</span></div></div>';
+
+    try {
+        const resp = await fetch('/api/voice/tts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: originalText })
+        });
+
+        if (!resp.ok) {
+            const errData = await resp.json().catch(() => ({}));
+            throw new Error(errData.error || 'TTS 请求失败');
+        }
+
+        const audioBlob = await resp.blob();
+        const audioUrl = URL.createObjectURL(audioBlob);
+        const duration = await getAudioDuration(audioUrl);
+
+        // 转换为语音气泡
+        bubbleEl.innerHTML = buildVoiceBubbleHTML(audioUrl, duration);
+
+        // 存储文本用于右键 "转文字"
+        bubble.__voiceText = originalText;
+        bubble.__voiceAudioUrl = audioUrl;
+
+        // 绑定播放 + 右键
+        bindVoiceBubbleEvents(bubble, bubbleEl);
+
+        // 自动播放
+        const playBtn = bubbleEl.querySelector('.voice-play-btn');
+        if (playBtn) playBtn.click();
+
+        frontendLog('info', `[VoiceReply] TTS 完成 | 文本长度=${originalText.length} | 音频时长=${duration.toFixed(1)}s`);
+    } catch (e) {
+        frontendLog('error', `[VoiceReply] TTS 失败: ${e.message}`);
+        // 失败时恢复文字显示
+        bubbleEl.textContent = originalText;
+    }
+}
+
+function buildVoiceBubbleHTML(audioUrl, duration) {
+    const durStr = duration >= 60
+        ? Math.floor(duration / 60) + ':' + Math.floor(duration % 60).toString().padStart(2, '0')
+        : Math.floor(duration) + '″';
+    return `
+        <div class="voice-bubble">
+            <button class="voice-play-btn" data-audio="${escapeHtml(audioUrl)}">
+                <svg class="play-icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"></polygon></svg>
+                <svg class="pause-icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="3" width="5" height="18" rx="1"/><rect x="14" y="3" width="5" height="18" rx="1"/></svg>
+            </button>
+            <div class="voice-waveform">
+                ${Array.from({length: 7}, () => '<span class="bar"></span>').join('')}
+            </div>
+            <span class="voice-duration">${durStr}</span>
+        </div>
+        <div class="voice-text-hidden"></div>
+    `;
+}
+
+function bindVoiceBubbleEvents(bubble, bubbleEl) {
+    const playBtn = bubbleEl.querySelector('.voice-play-btn');
+    const waveform = bubbleEl.querySelector('.voice-waveform');
+    const audioUrl = playBtn?.dataset.audio;
+
+    if (!playBtn || !audioUrl) return;
+
+    let audioEl = null;
+
+    function stopAudio() {
+        if (audioEl) {
+            audioEl.pause();
+            audioEl.currentTime = 0;
+            URL.revokeObjectURL(audioEl.src);
+            audioEl = null;
+        }
+        playBtn.classList.remove('playing');
+        waveform?.classList.remove('playing');
+    }
+
+    playBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (playBtn.classList.contains('playing')) {
+            stopAudio();
+        } else {
+            // 停止其他正在播放的语音
+            document.querySelectorAll('.voice-play-btn.playing').forEach(b => b.click());
+
+            audioEl = new Audio(audioUrl);
+            audioEl.onended = () => {
+                playBtn.classList.remove('playing');
+                waveform?.classList.remove('playing');
+            };
+            audioEl.onerror = () => stopAudio();
+            audioEl.play().then(() => {
+                playBtn.classList.add('playing');
+                waveform?.classList.add('playing');
+            }).catch(() => stopAudio());
+        }
+    });
+
+    // 右键菜单
+    bubble.addEventListener('contextmenu', (e) => {
+        if (bubble.__voiceText) {
+            e.preventDefault();
+            showContextMenu(e, bubble);
+        }
+    });
+}
+
+function getAudioDuration(url) {
+    return new Promise((resolve) => {
+        const audio = new Audio(url);
+        audio.addEventListener('loadedmetadata', () => {
+            resolve(audio.duration || 0);
+        });
+        audio.addEventListener('error', () => resolve(0));
+        // 超时兜底
+        setTimeout(() => resolve(0), 3000);
+    });
+}
+
+function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ============================================================
+// 右键菜单：语音 → 转文字
+// ============================================================
+let _ctxTargetBubble = null;
+
+function showContextMenu(e, bubble) {
+    _ctxTargetBubble = bubble;
+    dom.contextMenu.style.display = 'block';
+    dom.contextMenu.style.left = Math.min(e.clientX, window.innerWidth - 160) + 'px';
+    dom.contextMenu.style.top = Math.min(e.clientY, window.innerHeight - 60) + 'px';
+    e.stopPropagation();
+}
+
+function hideContextMenu() {
+    dom.contextMenu.style.display = 'none';
+    _ctxTargetBubble = null;
+}
+
+function handleContextTranscribe() {
+    const bubble = _ctxTargetBubble;
+    hideContextMenu();
+
+    if (!bubble || !bubble.__voiceText) return;
+
+    const hiddenDiv = bubble.querySelector('.voice-text-hidden');
+    if (hiddenDiv) {
+        if (hiddenDiv.classList.contains('show')) {
+            // 已经展开 → 收起
+            hiddenDiv.classList.remove('show');
+        } else {
+            // 展开文字
+            hiddenDiv.textContent = bubble.__voiceText;
+            hiddenDiv.classList.add('show');
+            scrollToBottom();
+            frontendLog('info', '[VoiceReply] 📝 用户查看转文字');
+        }
+    }
+}
+
 function showTyping(show) {
     dom.typingIndicator.style.display = show ? 'flex' : 'none';
     if (show) scrollToBottom();
@@ -451,9 +694,15 @@ async function saveModelSettings() {
         ollama_url: dom.cfgOllamaUrl.value.trim(),
         model_name: dom.cfgModelName.value.trim(),
         tts_provider: dom.cfgTtsProvider.value,
+        cosyvoice_api_url: dom.cfgCosyvoiceApiUrl.value.trim(),
+        cosyvoice_model: dom.cfgCosyvoiceModel.value.trim(),
         cosyvoice_api_key: dom.cfgCosyvoiceKey.value.trim(),
         cosyvoice_voice: dom.cfgCosyvoiceVoice.value,
+        voxcpm2_model_path: dom.cfgVoxcpm2Path.value.trim(),
+        voxcpm2_ref_audio: dom.cfgVoxcpm2RefAudio.value.trim(),
     };
+
+    frontendLog('info', `[Settings] 💾 保存设置 | tts_provider=${payload.tts_provider} voice=${payload.cosyvoice_voice} model=${payload.model_name}`);
 
     dom.settingsSaveStatus.textContent = '保存中...';
     dom.settingsSaveStatus.className = 'settings-save-status';
@@ -668,11 +917,15 @@ async function resetAll() {
         dom.cfgOllamaUrl.value = 'http://localhost:11434/api';
         dom.cfgModelName.value = 'qwen2.5:7b-instruct';
         dom.cfgTtsProvider.value = 'cosyvoice';
+        dom.cfgCosyvoiceApiUrl.value = 'https://dashscope.aliyuncs.com/api/v1';
+        dom.cfgCosyvoiceModel.value = 'cosyvoice-v3-flash';
         dom.cfgCosyvoiceKey.value = '';
         dom.cfgCosyvoiceVoice.value = 'longxing_v3';
         dom.ttsVoiceGrid.querySelectorAll('.tts-voice-card').forEach(c => {
             c.classList.toggle('selected', c.dataset.voice === 'longxing_v3');
         });
+        dom.cfgVoxcpm2Path.value = '';
+        dom.cfgVoxcpm2RefAudio.value = '';
         updateTtsProviderUI();
         await loadAllSettings();
     } catch (e) {
@@ -692,6 +945,18 @@ async function clearChat() {
 // ============================================================
 // API Test & Voice Preview
 // ============================================================
+function toggleApiKeyVisibility() {
+    const input = dom.cfgCosyvoiceKey;
+    const btn = dom.toggleApiKeyBtn;
+    if (input.type === 'password') {
+        input.type = 'text';
+        btn.textContent = '🙈';
+    } else {
+        input.type = 'password';
+        btn.textContent = '👁️';
+    }
+}
+
 async function testApiConnection() {
     const key = dom.cfgCosyvoiceKey.value.trim();
     if (!key) { dom.apiTestStatus.textContent = '请先输入 API Key'; dom.apiTestStatus.className = 'test-status error'; return; }
@@ -706,6 +971,8 @@ async function testApiConnection() {
             body: JSON.stringify({
                 text: '测试连接',
                 provider: 'cosyvoice',
+                api_url: dom.cfgCosyvoiceApiUrl.value.trim(),
+                model: dom.cfgCosyvoiceModel.value.trim(),
                 api_key: key,
                 voice: dom.cfgCosyvoiceVoice.value
             })
@@ -738,6 +1005,8 @@ async function previewVoice(voiceName, btnEl) {
             body: JSON.stringify({
                 text: '你好呀，我是你的AI伴侣，很高兴能陪你聊天~',
                 provider: 'cosyvoice',
+                api_url: dom.cfgCosyvoiceApiUrl.value.trim(),
+                model: dom.cfgCosyvoiceModel.value.trim(),
                 api_key: dom.cfgCosyvoiceKey.value.trim(),
                 voice: voiceName
             })
@@ -769,7 +1038,9 @@ function showCallUI() {
     dom.callAvatarImg.src = state.aiAvatar;
     dom.callFloatAvatarImg.src = state.aiAvatar;
     dom.callName.textContent = state.aiName;
-    dom.callUserText.textContent = '';
+    dom.callTitle.textContent = '正在听...';
+    dom.callTitle.className = 'call-title listening';
+    dom.callAvatarRing.className = 'call-avatar-ring listening';
     startCallTimer();
 }
 
@@ -847,9 +1118,7 @@ function updateCallFloatTimer() {
 }
 
 function updateCallStatus(statusType, text) {
-    dom.callStatusLabel.textContent = text;
-    dom.callStatusLabel.className = 'call-status-text ' + statusType;
-    // Also update inline status
+    // 只同步底部状态栏，不在全屏通话界面显示文字状态
     updateVoiceStatus(statusType, text);
 }
 
@@ -897,6 +1166,10 @@ function startVoiceCall() {
     state.interruptRequested = false;
     state.callMuted = false;
     dom.voiceCallBtn.classList.add('active');
+    // 语音通话期间禁用文字语音回复按钮
+    dom.voiceReplyBtn.style.opacity = '0.4';
+    dom.voiceReplyBtn.style.pointerEvents = 'none';
+    frontendLog('info', '[Voice] 📞 开始语音通话');
 
     // 显示全屏通话界面，隐藏内联状态栏
     dom.voiceStatus.style.display = 'none';
@@ -913,6 +1186,7 @@ function startVoiceCall() {
  * 结束语音通话
  */
 function endVoiceCall() {
+    frontendLog('info', '[Voice] 📴 结束语音通话');
     state.voiceActive = false;
     stopListening();
     disconnectVoiceWebSocket();
@@ -928,6 +1202,9 @@ function endVoiceCall() {
 
     // 恢复聊天 UI
     dom.voiceCallBtn.classList.remove('active', 'listening');
+    // 恢复语音回复按钮
+    dom.voiceReplyBtn.style.opacity = '';
+    dom.voiceReplyBtn.style.pointerEvents = '';
     dom.voiceStatus.style.display = 'none';
     dom.interruptBtn.style.display = 'none';
     dom.inputContainer.style.opacity = '1';
@@ -951,7 +1228,7 @@ function connectVoiceWebSocket() {
     state.wsConnected = false;
 
     state.ws.onopen = () => {
-        console.log('[WS] 已连接');
+        frontendLog('info', '[WS] 🔗 WebSocket 已连接');
         state.wsConnected = true;
     };
 
@@ -960,12 +1237,12 @@ function connectVoiceWebSocket() {
             const msg = JSON.parse(event.data);
             handleWsMessage(msg);
         } catch (e) {
-            console.error('[WS] 消息解析失败:', e);
+            frontendLog('warn', `[WS] 消息解析失败: ${e}`);
         }
     };
 
     state.ws.onclose = () => {
-        console.log('[WS] 连接关闭');
+        frontendLog('info', '[WS] 🔌 WebSocket 连接关闭');
         state.wsConnected = false;
         // 自动重连
         if (state.voiceActive && !state.interruptRequested) {
@@ -986,7 +1263,7 @@ function connectVoiceWebSocket() {
 function disconnectVoiceWebSocket() {
     if (state.ws) {
         state.ws.onclose = null; // 阻止自动重连
-        state.ws.close();
+        state.ws.close(1000, "用户挂断");  // 1000 = Normal Closure
         state.ws = null;
     }
     state.wsConnected = false;
@@ -1011,13 +1288,22 @@ function handleWsMessage(msg) {
         case 'user_text':
             if (msg.text) {
                 addMessage('user', msg.text);
+                frontendLog('info', `[WS] 用户语音识别: 「${msg.text.substring(0, 60)}」`);
                 // Show in call subtitle
-                dom.callUserText.textContent = msg.text;
                 _wsAiBubble = null;
                 _wsAiFullText = '';
+                updateCallStatus('processing', '思考中...');
+                state.interruptRequested = false;
+                state._wsTurnDone = false;
+            } else {
+                // ASR 未识别到有效语音（可能是回声/环境噪音误触发）
+                // 不改变"正在说..."状态，直接重新开始监听
+                frontendLog('info', '[WS] ASR 未识别到语音（回声/噪音），跳过');
+                if (state.voiceActive && !state.isPlayingAudio && state.audioQueue.length === 0) {
+                    updateCallStatus('listening', '正在听...');
+                    startListening();
+                }
             }
-            updateCallStatus('processing', '思考中...');
-            state.interruptRequested = false;
             break;
 
         case 'ai_text':
@@ -1050,12 +1336,13 @@ function handleWsMessage(msg) {
             _wsAiBubble = null;
             _wsAiFullText = '';
             updateCallStatus('listening', '正在听...');
-            dom.callUserText.textContent = '';
+            // (status text removed)
             startListening();
             break;
 
         case 'done':
             if (msg.name) state.aiName = msg.name;
+            state._wsTurnDone = true;
             if (!state.isPlayingAudio && state.audioQueue.length === 0) {
                 finishVoiceTurn();
             }
@@ -1080,7 +1367,7 @@ function handleWsMessage(msg) {
 function finishVoiceTurn() {
     dom.voiceWaveBar.classList.remove('speaking');
     dom.voiceStatusText.classList.remove('speaking');
-    dom.callUserText.textContent = '';
+    // (status text removed)
     if (state.voiceActive) {
         updateCallStatus('listening', '正在听...');
         startListening();
@@ -1095,6 +1382,11 @@ function playNextInQueue() {
         state.isPlayingAudio = false;
         dom.voiceWaveBar.classList.remove('speaking');
         dom.voiceStatusText.classList.remove('speaking');
+        // 服务端 done 先到了但音频还在播，补触发下一轮监听
+        if (state._wsTurnDone) {
+            state._wsTurnDone = false;
+            finishVoiceTurn();
+        }
         return;
     }
 
@@ -1143,7 +1435,6 @@ function interruptVoice() {
     stopAllAudio();
     sendWsMessage({ type: 'interrupt' });
     updateCallStatus('listening', '正在听...');
-    dom.callUserText.textContent = '';
 
     stopListening();
     setTimeout(() => {
@@ -1160,7 +1451,7 @@ function startListening() {
     state.voiceListening = true;
     state.audioChunks = [];
     state.interruptRequested = false;
-    dom.callUserText.textContent = '';
+    updateCallStatus('listening', '正在听...');
 
     let mimeType = 'audio/webm';
     if (!MediaRecorder.isTypeSupported('audio/webm')) {
@@ -1223,8 +1514,14 @@ async function sendAudioToServer(audioBlob) {
         return;
     }
 
-    updateCallStatus('processing', '识别中...');
+    // 如果 AI 正在说话（音频播放中），不要覆盖状态，避免回声误触发导致界面异常
+    if (!state.isPlayingAudio && state.audioQueue.length === 0) {
+        updateCallStatus('processing', '识别中...');
+    } else {
+        frontendLog('info', `[Voice] 录音已发送但 AI 仍在说话，跳过状态更新 (playing=${state.isPlayingAudio} queue=${state.audioQueue.length})`);
+    }
 
+    frontendLog('info', `[Voice] 🎤 发送音频到服务端 | size=${audioBlob.size} bytes`);
     const reader = new FileReader();
     reader.onload = () => {
         const base64 = reader.result.split(',')[1];
@@ -1243,7 +1540,10 @@ async function sendAudioToServer(audioBlob) {
 async function processVoiceInputHttp(audioBlob) {
     if (!state.voiceActive) return;
 
-    updateCallStatus('processing', '识别中...');
+    // 如果 AI 正在说话，不覆盖状态，避免回声误触发
+    if (!state.isPlayingAudio && state.audioQueue.length === 0) {
+        updateCallStatus('processing', '识别中...');
+    }
 
     const formData = new FormData();
     formData.append('audio', audioBlob, 'recording.wav');
@@ -1280,7 +1580,6 @@ async function processVoiceInputHttp(audioBlob) {
 
                 if (data.type === 'user' && data.text) {
                     addMessage('user', data.text);
-                    dom.callUserText.textContent = data.text;
                     updateCallStatus('processing', '思考中...');
                 }
                 if (data.type === 'sentence') {
@@ -1331,6 +1630,8 @@ function startSilenceDetection() {
         const SILENCE_THRESHOLD = 25;
         const SILENCE_DURATION = 2000;
 
+        let _wasSpeaking = false;
+
         _analyserInterval = setInterval(() => {
             if (!state.voiceListening) return;
             _audioAnalyser.getByteFrequencyData(dataArray);
@@ -1339,6 +1640,11 @@ function startSilenceDetection() {
             const avgVolume = sum / bufferLength;
 
             if (avgVolume < SILENCE_THRESHOLD) {
+                // 安静中
+                if (_wasSpeaking) {
+                    updateCallStatus('listening', '正在听...');
+                    _wasSpeaking = false;
+                }
                 if (!_silenceTimer) {
                     _silenceTimer = setTimeout(() => {
                         if (state.voiceListening && state.mediaRecorder && state.mediaRecorder.state === 'recording') {
@@ -1348,6 +1654,11 @@ function startSilenceDetection() {
                     }, SILENCE_DURATION);
                 }
             } else {
+                // 用户正在说话
+                if (!_wasSpeaking) {
+                    updateCallStatus('recording', '你说...');
+                    _wasSpeaking = true;
+                }
                 if (_silenceTimer) {
                     clearTimeout(_silenceTimer);
                     _silenceTimer = null;
@@ -1466,6 +1777,7 @@ function onAudioPlaybackEnded() {
 }
 
 function updateVoiceStatus(statusType, text) {
+    // 更新内联状态栏（最小化模式可见）
     dom.voiceStatusText.textContent = text;
     dom.voiceStatusText.className = 'voice-text';
     if (statusType === 'speaking') {
@@ -1473,6 +1785,45 @@ function updateVoiceStatus(statusType, text) {
         dom.voiceWaveBar.classList.add('speaking');
     } else {
         dom.voiceWaveBar.classList.remove('speaking');
+    }
+
+    // 同步更新全屏通话界面的头像下方状态文字
+    const callStatusEl = document.getElementById('callStatusText');
+    if (callStatusEl) {
+        callStatusEl.textContent = text;
+        callStatusEl.className = 'call-status-text';
+        if (statusType === 'speaking') {
+            callStatusEl.classList.add('speaking');
+        } else if (statusType === 'listening') {
+            callStatusEl.classList.add('listening');
+        } else if (statusType === 'recording') {
+            callStatusEl.classList.add('recording');
+        } else if (statusType === 'processing') {
+            callStatusEl.classList.add('processing');
+        }
+    }
+
+    // 同步更新全屏通话界面顶部标题栏
+    if (dom.callTitle) {
+        dom.callTitle.textContent = text;
+        dom.callTitle.className = 'call-title';
+        if (statusType === 'speaking') {
+            dom.callTitle.classList.add('speaking');
+        } else if (statusType === 'listening') {
+            dom.callTitle.classList.add('listening');
+        } else if (statusType === 'recording') {
+            dom.callTitle.classList.add('recording');
+        } else if (statusType === 'processing') {
+            dom.callTitle.classList.add('processing');
+        }
+    }
+
+    // ★ 驱动头像光环呼吸动画
+    if (dom.callAvatarRing) {
+        dom.callAvatarRing.className = 'call-avatar-ring';
+        if (statusType) {
+            dom.callAvatarRing.classList.add(statusType);
+        }
     }
 }
 

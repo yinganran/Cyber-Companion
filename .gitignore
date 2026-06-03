@@ -31,6 +31,9 @@ static/uploads/*.gif
 static/uploads/*.webp
 !static/uploads/.gitkeep
 
+# Logs
+app.log*
+
 # OS
 Thumbs.db
 .DS_Store

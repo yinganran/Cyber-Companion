@@ -1,12 +1,56 @@
 import os, json, re, uuid, time, threading, logging
 from datetime import datetime
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 from flask import Flask, render_template, request, jsonify, Response
 from flask_cors import CORS
 from flask_sock import Sock
 from PIL import Image
 import requests
 import voice as voice_module
+
+# ============================================================
+# Logging setup — 统一日志到 app.log，5MB 自动轮转，保留 3 个备份
+# ============================================================
+LOG_FILE = Path(__file__).parent / "app.log"
+LOG_FORMAT = "%(asctime)s | %(levelname)-5s | %(name)s | %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# 根 logger
+_root_logger = logging.getLogger()
+_root_logger.setLevel(logging.DEBUG)
+
+# 清除已有的 handlers（防止 Flask reloader 重复添加）
+_root_logger.handlers.clear()
+
+# 文件 handler
+_fh = RotatingFileHandler(
+    str(LOG_FILE), maxBytes=5 * 1024 * 1024, backupCount=3,
+    encoding="utf-8"
+)
+_fh.setLevel(logging.DEBUG)
+_fh.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
+_root_logger.addHandler(_fh)
+
+# 控制台也输出（但级别调高，避免刷屏）
+_ch = logging.StreamHandler()
+_ch.setLevel(logging.WARNING)
+_ch.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
+_root_logger.addHandler(_ch)
+
+# 静默第三方库的 DEBUG 日志
+for _lib in ["werkzeug", "urllib3", "PIL", "easyocr", "torch",
+             "funasr", "dashscope", "websocket", "httpcore"]:
+    logging.getLogger(_lib).setLevel(logging.WARNING)
+
+app_log = logging.getLogger("app")
+voice_log = logging.getLogger("voice")
+frontend_log = logging.getLogger("frontend")
+
+app_log.info("=" * 60)
+app_log.info("🚀 痞老板的凯伦 启动")
+app_log.info(f"  日志文件: {LOG_FILE}")
+app_log.info("=" * 60)
 
 # Config
 OLLAMA_API = os.environ.get("OLLAMA_API", "http://localhost:11434/api")
@@ -29,9 +73,6 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "ai-ban-secret-key-2024")
 CORS(app)
 sock = Sock(app)
-
-log = logging.getLogger("werkzeug")
-log.setLevel(logging.WARNING)
 
 # JSON helpers
 def load_json(path, default=None):
@@ -73,13 +114,20 @@ def get_settings():
         "ollama_url": OLLAMA_API,
         "model_name": MODEL_NAME,
         "tts_provider": "cosyvoice",
+        # CosyVoice 云端配置
+        "cosyvoice_api_url": voice_module.COSYVOICE_API_URL,
+        "cosyvoice_ws_url": voice_module.COSYVOICE_WS_URL,
         "cosyvoice_api_key": voice_module.COSYVOICE_API_KEY,
+        "cosyvoice_model": voice_module.COSYVOICE_MODEL,
         "cosyvoice_voice": voice_module.COSYVOICE_VOICE,
         "cosyvoice_volume": voice_module.COSYVOICE_VOLUME,
         "cosyvoice_speech_rate": voice_module.COSYVOICE_SPEECH_RATE,
         "cosyvoice_pitch_rate": voice_module.COSYVOICE_PITCH_RATE,
-        "asr_model_path": voice_module.SENSEVOICE_MODEL_PATH,
+        # VoxCPM2 本地配置
         "voxcpm2_model_path": voice_module.VOXCPM2_HUB_PATH,
+        "voxcpm2_ref_audio": voice_module.VOXCPM2_REF_AUDIO or "",
+        # ASR 配置
+        "asr_model_path": voice_module.SENSEVOICE_MODEL_PATH,
     }
     saved = load_json(SETTINGS_FILE, {})
     defaults.update(saved)
@@ -109,8 +157,10 @@ def _ollama_post(payload, stream=False):
             stream=stream, timeout=120
         )
     except requests.exceptions.ConnectionError:
+        app_log.error(f"[LLM] 无法连接到 Ollama ({OLLAMA_API})")
         raise Exception("无法连接到 Ollama，请确保 Ollama 正在运行。")
     except Exception as e:
+        app_log.error(f"[LLM] 调用异常: {e}")
         raise Exception(f"Ollama 错误：{str(e)}")
 
 
@@ -119,6 +169,11 @@ def call_ollama(messages, stream=False, system_prompt=None):
     if system_prompt:
         full_messages.append({"role": "system", "content": system_prompt})
     full_messages.extend(messages)
+
+    user_msg = messages[-1]["content"] if messages else ""
+    user_msg_preview = user_msg[:80] + "..." if len(user_msg) > 80 else user_msg
+    app_log.info(f"[LLM] 调用 Ollama | model={MODEL_NAME} stream={stream} | user=「{user_msg_preview}」")
+    t0 = time.time()
 
     payload = {
         "model": MODEL_NAME,
@@ -131,7 +186,11 @@ def call_ollama(messages, stream=False, system_prompt=None):
         return _ollama_post(payload, stream=True)
     else:
         resp = _ollama_post(payload, stream=False)
-        return resp.json().get("message", {}).get("content", "")
+        result = resp.json().get("message", {}).get("content", "")
+        elapsed = time.time() - t0
+        result_preview = result[:80] + "..." if len(result) > 80 else result
+        app_log.info(f"[LLM] Ollama 完成 | 耗时={elapsed:.2f}s | result=「{result_preview}」")
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +275,8 @@ def analyze_speaking_style(chat_messages):
         for msg in chat_messages
     ])
 
+    app_log.info(f"[Learn] 🧠 开始风格分析 | 消息数={len(chat_messages)} | 文本长度={len(chat_text)}")
+
     analysis_prompt = (
         "请分析以下聊天记录，总结说话者的语言风格、习惯和性格特点。\n\n"
         f"聊天记录：\n{chat_text}\n\n"
@@ -229,12 +290,14 @@ def analyze_speaking_style(chat_messages):
     )
 
     try:
-        return call_ollama(
+        result = call_ollama(
             messages=[{"role": "user", "content": analysis_prompt}],
             stream=False
         )
+        app_log.info(f"[Learn] ✅ 风格分析完成 | 结果长度={len(result)}")
+        return result
     except Exception as e:
-        print(f"风格分析失败：{e}")
+        app_log.error(f"[Learn] ❌ 风格分析失败: {e}")
         return DEFAULT_STYLE
 
 def build_system_prompt(style_analysis, custom_name="小赛"):
@@ -342,30 +405,38 @@ def _get_tts_provider():
 
 def tts_synthesize(text):
     provider = _get_tts_provider()
-    if provider == "cosyvoice" and voice_module.cosyvoice_is_available():
-        try:
+    if provider == "cosyvoice":
+        if voice_module.cosyvoice_is_available():
             return voice_module.synthesize_cosyvoice(text)
-        except Exception as e:
-            print(f"[TTS] CosyVoice 失败，fallback VoxCPM2: {e}")
-    return voice_module.synthesize_speech(text, inference_timesteps=3, max_len=512)
+        else:
+            raise Exception("CosyVoice 未配置，请在设置中填写 API Key")
+    elif provider == "voxcpm2":
+        return voice_module.synthesize_speech(text, inference_timesteps=3, max_len=512)
+    else:
+        raise Exception(f"未知 TTS 提供商: {provider}")
 
 def tts_synthesize_streaming(text):
     provider = _get_tts_provider()
-    if provider == "cosyvoice" and voice_module.cosyvoice_is_available():
-        try:
+    if provider == "cosyvoice":
+        if voice_module.cosyvoice_is_available():
             yield from voice_module.synthesize_cosyvoice_streaming(text)
             return
-        except Exception as e:
-            print(f"[TTS] CosyVoice 流式失败，fallback VoxCPM2: {e}")
-    audio = voice_module.synthesize_speech(text, inference_timesteps=3, max_len=512)
-    yield audio
+        else:
+            raise Exception("CosyVoice 未配置，请在设置中填写 API Key")
+    elif provider == "voxcpm2":
+        audio = voice_module.synthesize_speech(text, inference_timesteps=3, max_len=512)
+        yield audio
+    else:
+        raise Exception(f"未知 TTS 提供商: {provider}")
 
 # ============================================================
 # WebSocket 实时语音通话
 # ============================================================
 @sock.route("/ws/voice")
 def voice_websocket(ws):
+    app_log.info("[WS] 🔗 客户端已连接")
     cancel_event = threading.Event()
+    turn_count = 0
 
     try:
         while True:
@@ -380,7 +451,7 @@ def voice_websocket(ws):
             msg_type = msg.get("type", "")
 
             if msg_type == "interrupt":
-                print("[WS] ⏸ 用户打断")
+                app_log.info("[WS] ⏸ 用户打断")
                 cancel_event.set()
                 cancel_event = threading.Event()
                 ws.send(json.dumps({"type": "interrupted"}))
@@ -392,47 +463,87 @@ def voice_websocket(ws):
                 if not audio_b64:
                     continue
 
+                turn_count += 1
+                t_turn_start = time.time()
+                app_log.info(f"[WS] 🎤 第{turn_count}轮 收到音频 | size={len(audio_b64)} chars")
+
                 audio_data = base64.b64decode(audio_b64)
                 if not voice_module.validate_wav(audio_data):
+                    app_log.warning("[WS] 音频格式无效")
                     ws.send(json.dumps({"type": "error", "error": "无效音频格式"}))
                     continue
 
                 audio_data = voice_module.convert_wav_sample_rate(audio_data)
                 language = msg.get("language", "zh")
 
+                # --- ASR ---
+                t_asr = time.time()
                 try:
                     asr_r = voice_module.transcribe_audio(audio_data, language)
                 except Exception as e:
+                    app_log.error(f"[WS] ASR 失败: {e}")
                     ws.send(json.dumps({"type": "error", "error": f"ASR失败: {e}"}))
                     continue
+                asr_elapsed = time.time() - t_asr
 
                 user_text = asr_r.get("text", "").strip()
                 if not user_text:
+                    app_log.info(f"[WS] 第{turn_count}轮 ASR 未识别到语音 | 耗时={asr_elapsed:.3f}s → 跳过")
                     ws.send(json.dumps({"type": "user_text", "text": "", "message": "未识别到语音"}))
                     continue
 
+                app_log.info(f"[WS] 第{turn_count}轮 ASR 完成 | 耗时={asr_elapsed:.3f}s | text=「{user_text}」")
                 ws.send(json.dumps({"type": "user_text", "text": user_text}))
 
+                # --- LLM ---
+                t_llm = time.time()
                 system_prompt, messages, custom_name = _build_chat_context()
                 messages.append({"role": "user", "content": user_text})
 
                 try:
                     resp = call_ollama(messages, stream=True, system_prompt=system_prompt)
                 except Exception as e:
+                    app_log.error(f"[WS] LLM 调用失败: {e}")
                     ws.send(json.dumps({"type": "error", "error": f"LLM失败: {e}"}))
                     continue
+                llm_first_token = None
 
                 full_response = ""
+                sentence_count = 0
                 for sentence, full_response in _iter_sentences(resp, cancel_event):
+                    if llm_first_token is None:
+                        llm_first_token = time.time() - t_llm
+                    sentence_count += 1
                     ws.send(json.dumps({"type": "ai_text", "text": sentence}))
+
+                    # --- TTS ---
+                    t_tts = time.time()
                     try:
+                        audio_chunks_count = 0
                         for audio_chunk in tts_synthesize_streaming(sentence):
                             if cancel_event.is_set():
                                 break
                             ab64 = base64.b64encode(audio_chunk).decode("utf-8")
                             ws.send(json.dumps({"type": "tts_audio", "data": ab64}))
+                            audio_chunks_count += 1
+                        tts_elapsed = time.time() - t_tts
+                        app_log.info(f"[WS] 第{turn_count}轮 第{sentence_count}句 TTS完成 | "
+                                     f"chunks={audio_chunks_count} | 耗时={tts_elapsed:.3f}s | "
+                                     f"text=「{sentence[:50]}」")
                     except Exception as e:
-                        print(f"[WS] TTS分句失败: {e}")
+                        err_msg = str(e)[:200]
+                        app_log.error(f"[WS] TTS分句失败 | 第{sentence_count}句: {err_msg}")
+                        ws.send(json.dumps({"type": "error", "error": f"TTS失败: {err_msg}"}))
+
+                # --- 完成 ---
+                total_elapsed = time.time() - t_turn_start
+                first_token_str = f"LLM首token={llm_first_token:.3f}s | " if llm_first_token else ""
+                full_preview = full_response[:100] + "..." if len(full_response) > 100 else full_response
+                app_log.info(f"[WS] 第{turn_count}轮 完成 | "
+                             f"总耗时={total_elapsed:.2f}s | "
+                             f"{first_token_str}"
+                             f"总句数={sentence_count} | "
+                             f"全文=「{full_preview}」")
 
                 history = get_chat_history()
                 history.append({
@@ -446,10 +557,15 @@ def voice_websocket(ws):
                 ws.send(json.dumps({"type": "pong"}))
 
     except Exception as e:
-        print(f"[WS] 异常: {e}")
+        err_str = str(e)
+        # 正常关闭码：1000=正常, 1001=端离开, 1005=无状态码(浏览器默认)
+        if any(code in err_str for code in ("1000", "1001", "1005")):
+            app_log.info(f"[WS] 客户端断开连接 ({err_str})")
+        else:
+            app_log.error(f"[WS] 异常: {err_str}")
     finally:
         cancel_event.set()
-        print("[WS] 连接关闭")
+        app_log.info("[WS] 🔌 连接关闭")
 
 
 # Routes: Voice API
@@ -578,7 +694,7 @@ def voice_chat():
         })
     except Exception as e:
         # TTS 失败但对话成功，仍返回文字
-        print(f"[Voice] TTS失败: {e}")
+        app_log.error(f"[Voice] TTS失败: {e}")
         return jsonify({
             "success": True,
             "user_text": user_text,
@@ -663,14 +779,18 @@ def voice_chat_stream():
 
     audio_data = voice_module.convert_wav_sample_rate(audio_data)
     language = request.form.get("language", "zh")
+    app_log.info(f"[Voice-HTTP] 🎤 收到语音输入 | size={len(audio_data)} bytes")
 
     # Step 1: ASR（SenseVoiceSmall GPU，通常 < 100ms）
+    t_asr = time.time()
     try:
         asr_result = voice_module.transcribe_audio(audio_data, language)
     except Exception as e:
+        app_log.error(f"[Voice-HTTP] ASR 失败: {e}")
         return jsonify({"error": f"语音识别失败: {e}", "success": False}), 500
 
     user_text = asr_result.get("text", "").strip()
+    app_log.info(f"[Voice-HTTP] ASR 完成 | 耗时={time.time()-t_asr:.3f}s | text=「{user_text}」")
     system_prompt, messages, custom_name = _build_chat_context()
 
     if not user_text:
@@ -688,9 +808,12 @@ def voice_chat_stream():
         import base64, re as _re
         full_response = ""
         current_buffer = ""
+        sentence_idx = 0
+        t_llm_start = time.time()
 
         # 先推送用户文本
         yield f"data: {json.dumps({'type': 'user', 'text': user_text, 'name': custom_name})}\n\n"
+        app_log.info(f"[Voice-HTTP] 开始 LLM 流式生成...")
 
         try:
             resp = call_ollama(messages, stream=True, system_prompt=system_prompt)
@@ -733,24 +856,29 @@ def voice_chat_stream():
                     if not sentence:
                         continue
 
+                    sentence_idx += 1
                     # 分句 TTS（语音通话优化参数）
+                    t_tts = time.time()
                     try:
                         audio_bytes = tts_synthesize(sentence)
                         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                        app_log.info(f"[Voice-HTTP] 第{sentence_idx}句 TTS | 耗时={time.time()-t_tts:.3f}s | size={len(audio_bytes)}b | text=「{sentence[:50]}」")
                         yield f"data: {json.dumps({'type': 'sentence', 'text': sentence, 'audio': audio_b64})}\n\n"
                     except Exception as e:
-                        print(f"[Voice] TTS 分句失败 ({sentence[:20]}...): {e}")
+                        app_log.error(f"[Voice-HTTP] TTS 分句失败 ({sentence[:20]}...): {e}")
                         yield f"data: {json.dumps({'type': 'sentence', 'text': sentence, 'audio': None, 'tts_error': str(e)})}\n\n"
 
             # 处理剩余文本
             remaining = current_buffer.strip()
             if remaining:
+                sentence_idx += 1
                 try:
                     audio_bytes = tts_synthesize(remaining)
                     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                    app_log.info(f"[Voice-HTTP] 第{sentence_idx}句(尾) TTS | size={len(audio_bytes)}b | text=「{remaining[:50]}」")
                     yield f"data: {json.dumps({'type': 'sentence', 'text': remaining, 'audio': audio_b64})}\n\n"
                 except Exception as e:
-                    print(f"[Voice] TTS 尾句失败: {e}")
+                    app_log.error(f"[Voice-HTTP] TTS 尾句失败: {e}")
                     yield f"data: {json.dumps({'type': 'sentence', 'text': remaining, 'audio': None})}\n\n"
 
             # 异步落库（不阻塞 SSE 流）
@@ -762,10 +890,12 @@ def voice_chat_stream():
             })
             save_chat_history(history)
 
+            total_elapsed = time.time() - t_llm_start
+            app_log.info(f"[Voice-HTTP] ✅ 完成 | 总耗时={total_elapsed:.2f}s | 句数={sentence_idx} | 全文=「{full_response[:100]}」")
             yield f"data: {json.dumps({'type': 'done', 'name': custom_name, 'full_text': full_response})}\n\n"
 
         except Exception as e:
-            print(f"[Voice] 流式对话异常: {e}")
+            app_log.error(f"[Voice-HTTP] 流式对话异常: {e}")
             # 尽力保存已有内容
             if full_response:
                 try:
@@ -796,21 +926,28 @@ def voice_chat_stream():
 def voice_tts_test():
     """
     测试 TTS 连接 / 试听音色。
-    前端传入 api_key + voice，后端临时切换配置进行测试，
-    不依赖是否已保存——输入框里的 Key 直接生效。
+    前端传入 api_url + model + api_key + voice，后端临时切换配置进行测试。
     """
     data = request.get_json() or {}
     test_text = data.get("text", "你好，我是你的AI伴侣，很高兴认识你！")
     provider = data.get("provider") or _get_tts_provider()
 
-    # 备份原始配置，用请求参数临时覆盖
+    # 备份原始配置
+    orig_api_url = voice_module.COSYVOICE_API_URL
+    orig_model = voice_module.COSYVOICE_MODEL
     orig_api_key = voice_module.COSYVOICE_API_KEY
     orig_voice = voice_module.COSYVOICE_VOICE
 
     try:
+        api_url = data.get("api_url", "").strip()
+        model = data.get("model", "").strip()
         api_key = data.get("api_key", "").strip()
         voice = data.get("voice", "").strip()
 
+        if api_url:
+            voice_module.set_cosyvoice_config(api_url=api_url)
+        if model:
+            voice_module.set_cosyvoice_config(model=model)
         if api_key:
             voice_module.set_cosyvoice_config(api_key=api_key)
         if voice:
@@ -831,7 +968,14 @@ def voice_tts_test():
     except Exception as e:
         return jsonify({"success": False, "error": str(e), "provider": provider}), 500
     finally:
-        voice_module.set_cosyvoice_config(api_key=orig_api_key, voice=orig_voice)
+        # ★ 只恢复原来非空的值，避免空字符串覆盖掉用户已保存的有效配置
+        restore = {}
+        if orig_api_url:   restore["api_url"] = orig_api_url
+        if orig_model:     restore["model"] = orig_model
+        if orig_api_key:   restore["api_key"] = orig_api_key
+        if orig_voice:     restore["voice"] = orig_voice
+        if restore:
+            voice_module.set_cosyvoice_config(**restore)
 
 
 @app.route("/api/voice/status", methods=["GET"])
@@ -857,6 +1001,8 @@ def chat():
     if not user_message:
         return jsonify({"error": "消息不能为空"}), 400
 
+    app_log.info(f"[Chat] 📝 收到文本消息: 「{user_message[:100]}」")
+
     system_prompt, messages, custom_name = _build_chat_context()
     messages.append({"role": "user", "content": user_message})
 
@@ -869,8 +1015,10 @@ def chat():
             "timestamp": datetime.now().isoformat()
         })
         save_chat_history(history)
+        app_log.info(f"[Chat] ✅ 回复完成 | name={custom_name} | 回复=「{ai_response[:100]}」")
         return jsonify({"response": ai_response, "name": custom_name})
     except Exception as e:
+        app_log.error(f"[Chat] ❌ 失败: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/chat/stream", methods=["POST"])
@@ -879,6 +1027,9 @@ def chat_stream():
     user_message = data.get("message", "").strip()
     if not user_message:
         return jsonify({"error": "消息不能为空"}), 400
+
+    app_log.info(f"[Chat-Stream] 📝 收到文本消息: 「{user_message[:100]}」")
+    t0 = time.time()
 
     system_prompt, messages, custom_name = _build_chat_context()
     messages.append({"role": "user", "content": user_message})
@@ -908,7 +1059,9 @@ def chat_stream():
             save_chat_history(history)
             data_json = json.dumps({"content": "", "done": True, "name": custom_name})
             yield f"data: {data_json}\n\n"
+            app_log.info(f"[Chat-Stream] ✅ 完成 | 总耗时={time.time()-t0:.2f}s | 回复=「{full_response[:100]}」")
         except Exception as e:
+            app_log.error(f"[Chat-Stream] ❌ 失败: {e}")
             data_json = json.dumps({"error": str(e), "done": True})
             yield f"data: {data_json}\n\n"
 
@@ -925,10 +1078,30 @@ def chat_stream():
 # ============================================================
 # Routes: Settings API
 # ============================================================
+@app.route("/api/log", methods=["POST"])
+def frontend_log_endpoint():
+    """接收前端日志并写入 app.log（方便追踪前端操作）"""
+    try:
+        data = request.get_json(force=True)
+        if not data:
+            return jsonify({"ok": True})
+        msg = data.get("message", "")
+        level = data.get("level", "info").lower()
+        if level == "error":
+            frontend_log.error(f"[前端] {msg}")
+        elif level == "warn":
+            frontend_log.warning(f"[前端] {msg}")
+        else:
+            frontend_log.info(f"[前端] {msg}")
+    except Exception:
+        pass  # 日志记录失败不影响主流程
+    return jsonify({"ok": True})
+
 @app.route("/api/settings", methods=["GET"])
 def api_get_settings():
     settings = get_settings()
     profile = get_profile()
+    app_log.info("[Settings] 前端获取设置")
     return jsonify({
         "success": True,
         "settings": settings,
@@ -950,19 +1123,40 @@ def api_update_settings():
     if not data:
         return jsonify({"error": "请提供 JSON 数据"}), 400
 
+    # 记录前端修改的设置项
+    changed_keys = [k for k in data if k not in ("_",)]
+    app_log.info(f"[Settings] 💾 前端保存设置: {changed_keys}")
+    for k, v in data.items():
+        if k == "cosyvoice_api_key":
+            app_log.info(f"[Settings]   {k} = {'***已设置***' if v else '空'}")
+        else:
+            app_log.info(f"[Settings]   {k} = {v}")
+
     model_config = {}
     for key in ["ollama_url", "model_name", "tts_provider",
-                "cosyvoice_api_key", "cosyvoice_voice",
+                # CosyVoice
+                "cosyvoice_api_url", "cosyvoice_ws_url",
+                "cosyvoice_api_key", "cosyvoice_model", "cosyvoice_voice",
                 "cosyvoice_volume", "cosyvoice_speech_rate", "cosyvoice_pitch_rate",
-                "asr_model_path", "voxcpm2_model_path"]:
+                # VoxCPM2
+                "voxcpm2_model_path", "voxcpm2_ref_audio",
+                # ASR
+                "asr_model_path"]:
         if key in data:
             model_config[key] = data[key]
 
     if model_config:
         save_settings(model_config)
 
+    # 实时更新 voice_module 全局变量
+    if "cosyvoice_api_url" in data:
+        voice_module.set_cosyvoice_config(api_url=data["cosyvoice_api_url"])
+    if "cosyvoice_ws_url" in data:
+        voice_module.set_cosyvoice_config(ws_url=data["cosyvoice_ws_url"])
     if "cosyvoice_api_key" in data:
         voice_module.set_cosyvoice_config(api_key=data["cosyvoice_api_key"])
+    if "cosyvoice_model" in data:
+        voice_module.set_cosyvoice_config(model=data["cosyvoice_model"])
     if "cosyvoice_voice" in data:
         voice_module.set_cosyvoice_config(voice=data["cosyvoice_voice"])
     if "cosyvoice_volume" in data:
@@ -971,6 +1165,13 @@ def api_update_settings():
         voice_module.set_cosyvoice_config(speech_rate=data["cosyvoice_speech_rate"])
     if "cosyvoice_pitch_rate" in data:
         voice_module.set_cosyvoice_config(pitch_rate=data["cosyvoice_pitch_rate"])
+
+    # VoxCPM2 路径实时切换
+    if "voxcpm2_model_path" in data:
+        voice_module.VOXCPM2_HUB_PATH = data["voxcpm2_model_path"]
+        voice_module._voxcpm2_real_path = voice_module._resolve_voxcpm2_path()
+    if "voxcpm2_ref_audio" in data:
+        voice_module.VOXCPM2_REF_AUDIO = data["voxcpm2_ref_audio"] or None
 
     if "name" in data:
         save_profile({"name": data["name"].strip()})
@@ -1072,7 +1273,7 @@ def upload_avatar():
         else:
             img.save(str(filepath), "PNG")
     except Exception as e:
-        print(f"头像上传失败：{str(e)}")
+        app_log.error(f"头像上传失败：{str(e)}")
         return jsonify({"error": f"图片处理失败：{str(e)}"}), 400
 
     save_profile({f"avatar_{avatar_type}": str(filepath.name)})
@@ -1140,22 +1341,71 @@ def api_clear_history():
 
 # Startup
 if __name__ == "__main__":
-    print("=" * 55)
-    print("  痞老板的凯伦")
-    print("  质疑痞老板，理解痞老板，成为痞老板")
-    print(f"  LLM: {MODEL_NAME}  @  {OLLAMA_API}")
-    print(f"  TTS: {voice_module.COSYVOICE_MODEL}  (voice={voice_module.COSYVOICE_VOICE})")
-    print("=" * 55)
+    app_log.info("=" * 55)
+    app_log.info("  痞老板的凯伦 启动")
+    app_log.info(f"  LLM: {MODEL_NAME}  @  {OLLAMA_API}")
+    app_log.info(f"  TTS: {voice_module.COSYVOICE_MODEL} (voice={voice_module.COSYVOICE_VOICE})")
+    app_log.info("=" * 55)
 
-    # 预加载语音模型
-    print("\n正在预加载语音模型，请稍候...\n")
+    # ★ 先从保存的设置恢复模型路径（必须在 init_models 之前）
+    saved_settings = load_json(SETTINGS_FILE, {})
+    if saved_settings.get("voxcpm2_model_path"):
+        voice_module.VOXCPM2_HUB_PATH = saved_settings["voxcpm2_model_path"]
+        voice_module._voxcpm2_real_path = voice_module._resolve_voxcpm2_path()
+        app_log.info(f"[Voice] VoxCPM2 路径 (来自设置): {saved_settings['voxcpm2_model_path']}")
+    if saved_settings.get("voxcpm2_ref_audio"):
+        voice_module.VOXCPM2_REF_AUDIO = saved_settings["voxcpm2_ref_audio"]
+    if saved_settings.get("tts_provider"):
+        app_log.info(f"[Voice] TTS 提供商 (来自设置): {saved_settings['tts_provider']}")
+
+    # ★ 根据设置决定是否加载 VoxCPM2（在线模式不加载，节省 ~6GB 显存）
+    load_voxcpm2 = (saved_settings.get("tts_provider") == "voxcpm2")
+
+    # ★ 在 init_models 之前恢复 CosyVoice 配置，避免日志显示"未配置"
+    if saved_settings.get("cosyvoice_api_url"):
+        voice_module.COSYVOICE_API_URL = saved_settings["cosyvoice_api_url"]
+    if saved_settings.get("cosyvoice_ws_url"):
+        voice_module.COSYVOICE_WS_URL = saved_settings["cosyvoice_ws_url"]
+    if saved_settings.get("cosyvoice_api_key"):
+        voice_module.COSYVOICE_API_KEY = saved_settings["cosyvoice_api_key"]
+    if saved_settings.get("cosyvoice_model"):
+        voice_module.COSYVOICE_MODEL = saved_settings["cosyvoice_model"]
+    if saved_settings.get("cosyvoice_voice"):
+        voice_module.COSYVOICE_VOICE = saved_settings["cosyvoice_voice"]
+    if saved_settings.get("cosyvoice_volume") is not None:
+        voice_module.COSYVOICE_VOLUME = int(saved_settings["cosyvoice_volume"])
+    if saved_settings.get("cosyvoice_speech_rate") is not None:
+        voice_module.COSYVOICE_SPEECH_RATE = float(saved_settings["cosyvoice_speech_rate"])
+    if saved_settings.get("cosyvoice_pitch_rate") is not None:
+        voice_module.COSYVOICE_PITCH_RATE = float(saved_settings["cosyvoice_pitch_rate"])
+
+    # 预加载语音模型（此时 CosyVoice 配置已就绪）
+    app_log.info("正在预加载语音模型，请稍候...")
     try:
-        voice_module.init_models()
+        voice_module.init_models(load_voxcpm2=load_voxcpm2)
     except Exception as e:
-        print(f"[Voice] 模型预加载异常: {e}")
+        app_log.error(f"[Voice] 模型预加载异常: {e}")
 
-    print(f"\n  访问地址: http://localhost:5000")
-    print("=" * 50)
+    # ★ 通过 set_cosyvoice_config 确认初始化 dashscope（前面已设全局变量，此处确保生效）
+    if saved_settings.get("cosyvoice_api_url"):
+        voice_module.set_cosyvoice_config(api_url=saved_settings["cosyvoice_api_url"])
+    if saved_settings.get("cosyvoice_ws_url"):
+        voice_module.set_cosyvoice_config(ws_url=saved_settings["cosyvoice_ws_url"])
+    if saved_settings.get("cosyvoice_api_key"):
+        voice_module.set_cosyvoice_config(api_key=saved_settings["cosyvoice_api_key"])
+    if saved_settings.get("cosyvoice_model"):
+        voice_module.set_cosyvoice_config(model=saved_settings["cosyvoice_model"])
+    if saved_settings.get("cosyvoice_voice"):
+        voice_module.set_cosyvoice_config(voice=saved_settings["cosyvoice_voice"])
+    if saved_settings.get("cosyvoice_volume") is not None:
+        voice_module.set_cosyvoice_config(volume=saved_settings["cosyvoice_volume"])
+    if saved_settings.get("cosyvoice_speech_rate") is not None:
+        voice_module.set_cosyvoice_config(speech_rate=saved_settings["cosyvoice_speech_rate"])
+    if saved_settings.get("cosyvoice_pitch_rate") is not None:
+        voice_module.set_cosyvoice_config(pitch_rate=saved_settings["cosyvoice_pitch_rate"])
+
+    app_log.info(f"访问地址: http://localhost:5000")
+    app_log.info("=" * 50)
 
     # 关键：use_reloader=False 防止 Flask 双进程导致 CUDA 上下文冲突
     # debug=True 保留开发模式（错误页面、热重载除外）

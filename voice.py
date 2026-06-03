@@ -1,12 +1,14 @@
 """
-语音模块 — SenseVoiceSmall (语音识别) + VoxCPM2 (语音合成)
+语音模块 — SenseVoiceSmall (语音识别) + VoxCPM2 / CosyVoice (语音合成)
 
 启动时调用 init_models() 预加载所有模型，确保前端打开即可使用语音通话。
 """
 
-import os, io, wave, tempfile, sys, json
+import os, io, wave, tempfile, sys, json, logging
 import numpy as np
 from pathlib import Path
+
+voice_log = logging.getLogger("voice")
 
 # ============================================================
 # 模型路径配置
@@ -26,14 +28,21 @@ ASR_SAMPLE_RATE = 16000
 TTS_SAMPLE_RATE = 48000
 
 # ============================================================
-# CosyVoice 云端 TTS 配置（阿里云 DashScope / 百炼平台）
-# 模型: cosyvoice-v3-flash  +  音色: longxing_v3 (龙星)
+# CosyVoice 云端 TTS 配置（阿里云 DashScope / 百炼平台 / 兼容 OpenAI TTS）
 # ============================================================
+COSYVOICE_API_URL = os.environ.get(
+    "COSYVOICE_API_URL",
+    "https://dashscope.aliyuncs.com/api/v1"  # 百炼平台默认端点
+)
+COSYVOICE_WS_URL = os.environ.get(
+    "COSYVOICE_WS_URL",
+    "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+)
 COSYVOICE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
 COSYVOICE_VOICE = os.environ.get("COSYVOICE_VOICE", "longxing_v3")
 COSYVOICE_MODEL = os.environ.get("COSYVOICE_MODEL", "cosyvoice-v3-flash")
-# 合成参数（参照 test.py）
-COSYVOICE_FORMAT = os.environ.get("COSYVOICE_FORMAT", "mp3")  # mp3 或 wav
+# 合成参数
+COSYVOICE_FORMAT = os.environ.get("COSYVOICE_FORMAT", "mp3")  # mp3 默认，wav 需 pydub 转换
 COSYVOICE_VOLUME = int(os.environ.get("COSYVOICE_VOLUME", "50"))
 COSYVOICE_SPEECH_RATE = float(os.environ.get("COSYVOICE_SPEECH_RATE", "1.0"))
 COSYVOICE_PITCH_RATE = float(os.environ.get("COSYVOICE_PITCH_RATE", "1.0"))
@@ -96,16 +105,17 @@ def _resolve_voxcpm2_path():
 # ============================================================
 # 模型初始化（启动时调用，一次性加载完毕）
 # ============================================================
-def init_models():
+def init_models(load_voxcpm2=False):
     """
-    预加载所有语音模型。在 app.py 启动时调用。
-    加载完成后前端即可直接使用语音通话，无需等待。
-    自动检测 GPU 并启用加速。
+    预加载语音模型。在 app.py 启动时调用。
+    - ASR (SenseVoiceSmall): 始终加载
+    - CosyVoice: 始终检测可用性（轻量，不占 GPU）
+    - VoxCPM2: 仅在 load_voxcpm2=True 时加载（占用 ~6GB 显存）
     """
     global _voxcpm2_real_path
-    print("=" * 50)
-    print("[Voice] 开始预加载语音模型...")
-    print(f"[Voice] PyTorch: {_get_torch_version()}")
+    voice_log.info("=" * 50)
+    voice_log.info("[Voice] 开始预加载语音模型...")
+    voice_log.info(f"[Voice] PyTorch: {_get_torch_version()}")
 
     # GPU 检测与优化设置
     import torch
@@ -113,42 +123,43 @@ def init_models():
     if gpu_ok:
         gpu_name = torch.cuda.get_device_name(0)
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        print(f"[Voice] GPU: {gpu_name} ({gpu_mem:.1f} GB VRAM)")
-        # 启用 cuDNN benchmark 优化固定尺寸输入的推理
+        voice_log.info(f"[Voice] GPU: {gpu_name} ({gpu_mem:.1f} GB VRAM)")
         torch.backends.cudnn.benchmark = True
-        # 允许 TF32 加速（Ampere+ 架构，RTX 5060 为 Blackwell，完全支持）
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
     else:
-        print("[Voice] GPU: 不可用（使用 CPU 模式）")
+        voice_log.info("[Voice] GPU: 不可用（使用 CPU 模式）")
 
-    print("=" * 50)
+    voice_log.info("=" * 50)
 
-    # --- SenseVoiceSmall ---
+    # --- SenseVoiceSmall (始终加载) ---
     _init_asr()
 
-    # --- VoxCPM2 ---
-    _voxcpm2_real_path = _resolve_voxcpm2_path()
-    _init_tts()
+    # --- VoxCPM2 (按需加载) ---
+    if load_voxcpm2:
+        _voxcpm2_real_path = _resolve_voxcpm2_path()
+        _init_tts()
+    else:
+        voice_log.info("[Voice] TTS (VoxCPM2): 跳过预加载（当前使用在线 TTS，节省显存）")
 
     # --- CosyVoice 云端 TTS ---
     _init_cosyvoice()
 
     # --- 状态汇总 ---
-    print("=" * 50)
+    voice_log.info("=" * 50)
     asr_ok = _sense_voice_model is not None
     tts_ok = _voxcpm2_model is not None
     cosy_ok = _cosyvoice_available
-    print(f"[Voice] ASR (SenseVoiceSmall): {'✓ 已加载' if asr_ok else '✗ 未加载'}  "
+    voice_log.info(f"[Voice] ASR (SenseVoiceSmall): {'✓ 已加载' if asr_ok else '✗ 未加载'}  "
           f"设备: {'GPU' if gpu_ok else 'CPU'}")
-    print(f"[Voice] TTS (VoxCPM2):       {'✓ 已加载' if tts_ok else '✗ 未加载（文字对话仍可用）'}  "
+    voice_log.info(f"[Voice] TTS (VoxCPM2):       {'✓ 已加载' if tts_ok else '⊙ 未加载（节省显存）'}  "
           f"设备: {'GPU' if _voxcpm2_has_gpu else 'CPU'}")
-    print(f"[Voice] TTS (CosyVoice云端): {'✓ 可用' if cosy_ok else '✗ 未配置 (设置 DASHSCOPE_API_KEY 以启用)'}  "
+    voice_log.info(f"[Voice] TTS (CosyVoice云端): {'✓ 可用' if cosy_ok else '✗ 未配置 (设置 DASHSCOPE_API_KEY 以启用)'}  "
           f"voice={COSYVOICE_VOICE}")
     if tts_ok and _voxcpm2_has_gpu:
         allocated = torch.cuda.memory_allocated(0) / 1024**3
-        print(f"[Voice] GPU 显存占用: {allocated:.2f} GB")
-    print("=" * 50)
+        voice_log.info(f"[Voice] GPU 显存占用: {allocated:.2f} GB")
+    voice_log.info("=" * 50)
 
     return asr_ok, tts_ok
 
@@ -159,14 +170,14 @@ def _init_asr():
     try:
         from funasr import AutoModel
     except ImportError:
-        print("[Voice] ✗ FunASR 未安装，ASR 不可用。pip install funasr")
+        voice_log.warning("[Voice] ✗ FunASR 未安装，ASR 不可用。pip install funasr")
         return
 
     model_path = SENSEVOICE_MODEL_PATH
-    print(f"[Voice] 加载 ASR: {model_path}")
+    voice_log.info(f"[Voice] 加载 ASR: {model_path}")
 
     if not Path(model_path).exists():
-        print(f"[Voice] ✗ ASR 模型路径不存在: {model_path}")
+        voice_log.error(f"[Voice] ✗ ASR 模型路径不存在: {model_path}")
         return
 
     gpu_available = _cuda_available()
@@ -178,15 +189,15 @@ def _init_asr():
             vad_kwargs={"max_single_segment_time": 30000},
             device=device,
         )
-        print(f"[Voice] ✓ SenseVoiceSmall 加载成功 (VAD, device={device}, "
+        voice_log.info(f"[Voice] ✓ SenseVoiceSmall 加载成功 (VAD, device={device}, "
               f"GPU={'Yes' if gpu_available else 'No'})")
     except Exception as e:
-        print(f"[Voice] VAD 加载失败 ({e})，尝试无 VAD...")
+        voice_log.warning(f"[Voice] VAD 加载失败 ({e})，尝试无 VAD...")
         try:
             _sense_voice_model = AutoModel(model=model_path, device=device)
-            print(f"[Voice] ✓ SenseVoiceSmall 加载成功 (无VAD, device={device})")
+            voice_log.info(f"[Voice] ✓ SenseVoiceSmall 加载成功 (无VAD, device={device})")
         except Exception as e2:
-            print(f"[Voice] ✗ SenseVoiceSmall 加载失败: {e2}")
+            voice_log.error(f"[Voice] ✗ SenseVoiceSmall 加载失败: {e2}")
 
 
 def _init_tts():
@@ -195,7 +206,7 @@ def _init_tts():
     model_path = _voxcpm2_real_path
 
     if not model_path or not Path(model_path).exists():
-        print(f"[Voice] ✗ VoxCPM2 模型路径不存在: {model_path}")
+        voice_log.error(f"[Voice] ✗ VoxCPM2 模型路径不存在: {model_path}")
         return
 
     # 读取 config 确认模型类型
@@ -204,9 +215,9 @@ def _init_tts():
         with open(config_path) as f:
             config = json.load(f)
         arch = config.get("architecture", "unknown")
-        print(f"[Voice] VoxCPM2 架构: {arch}")
+        voice_log.info(f"[Voice] VoxCPM2 架构: {arch}")
     else:
-        print(f"[Voice] ✗ config.json 未找到: {config_path}")
+        voice_log.error(f"[Voice] ✗ config.json 未找到: {config_path}")
         return
 
     # ---- 方式1: voxcpm 专用包（推荐，用户已安装且 CLI 可用）----
@@ -215,7 +226,7 @@ def _init_tts():
 
         gpu_available = _cuda_available()
         device = "cuda" if gpu_available else "cpu"
-        print(f"[Voice] 通过 voxcpm 包加载 (device={device}, optimize={gpu_available})...")
+        voice_log.info(f"[Voice] 通过 voxcpm 包加载 (device={device}, optimize={gpu_available})...")
 
         _voxcpm2_model = VoxCPM(
             voxcpm_model_path=model_path,
@@ -224,20 +235,20 @@ def _init_tts():
             device=device,
         )
         _voxcpm2_has_gpu = gpu_available
-        print(f"[Voice] ✓ VoxCPM2 加载成功 (voxcpm 包, device={device}, "
+        voice_log.info(f"[Voice] ✓ VoxCPM2 加载成功 (voxcpm 包, device={device}, "
               f"输出={TTS_SAMPLE_RATE}Hz)")
         return
     except ImportError:
-        print("[Voice] voxcpm 包未安装")
+        voice_log.warning("[Voice] voxcpm 包未安装")
     except Exception as e:
-        print(f"[Voice] voxcpm 加载失败: {e}")
+        voice_log.warning(f"[Voice] voxcpm 加载失败: {e}")
 
     # ---- 方式2: voxcpm.from_pretrained（从 HF 自动下载/使用缓存）----
     try:
         from voxcpm import VoxCPM
         gpu_available = _cuda_available()
         device = "cuda" if gpu_available else "cpu"
-        print(f"[Voice] 尝试 from_pretrained (device={device})...")
+        voice_log.info(f"[Voice] 尝试 from_pretrained (device={device})...")
         _voxcpm2_model = VoxCPM.from_pretrained(
             hf_model_id="openbmb/VoxCPM2",
             device=device,
@@ -246,37 +257,37 @@ def _init_tts():
             optimize=gpu_available,
         )
         _voxcpm2_has_gpu = gpu_available
-        print(f"[Voice] ✓ VoxCPM2 加载成功 (from_pretrained, device={device})")
+        voice_log.info(f"[Voice] ✓ VoxCPM2 加载成功 (from_pretrained, device={device})")
         return
     except ImportError:
         pass
     except Exception as e:
-        print(f"[Voice] from_pretrained 失败: {e}")
+        voice_log.warning(f"[Voice] from_pretrained 失败: {e}")
 
     # ---- 方式3: CosyVoice（备选）----
     try:
         from cosyvoice.cli.cosyvoice import CosyVoice2
         _voxcpm2_model = CosyVoice2(model_path, load_jit=False, load_trt=False)
-        print("[Voice] ✓ VoxCPM2 通过 CosyVoice2 加载成功")
+        voice_log.info("[Voice] ✓ VoxCPM2 通过 CosyVoice2 加载成功")
         return
     except ImportError:
         pass
     except Exception as e:
-        print(f"[Voice] CosyVoice2 失败: {e}")
+        voice_log.warning(f"[Voice] CosyVoice2 失败: {e}")
 
     try:
         from cosyvoice.cli.cosyvoice import CosyVoice
         _voxcpm2_model = CosyVoice(model_path)
-        print("[Voice] ✓ VoxCPM2 通过 CosyVoice 加载成功")
+        voice_log.info("[Voice] ✓ VoxCPM2 通过 CosyVoice 加载成功")
         return
     except ImportError:
         pass
     except Exception as e:
-        print(f"[Voice] CosyVoice 失败: {e}")
+        voice_log.warning(f"[Voice] CosyVoice 失败: {e}")
 
     # ---- 全部失败 ----
-    print("[Voice] ✗ VoxCPM2 加载失败，TTS 不可用")
-    print("[Voice] 提示: pip install voxcpm")
+    voice_log.error("[Voice] ✗ VoxCPM2 加载失败，TTS 不可用")
+    voice_log.info("[Voice] 提示: pip install voxcpm")
 
 
 # ============================================================
@@ -324,7 +335,7 @@ def transcribe_audio(audio_data, language="zh"):
                 text = text.split("|>")[-1]
         return {"text": text.strip(), "language": language, "success": True}
     except Exception as e:
-        print(f"[Voice] ASR失败: {e}")
+        voice_log.error(f"[Voice] ASR失败: {e}")
         return {"text": "", "language": language, "success": False, "error": str(e)}
     finally:
         try:
@@ -427,14 +438,25 @@ def _pcm_to_wav_bytes(pcm_bytes, sample_rate):
 
 
 def _ensure_wav_bytes(audio_data):
-    """统一转换为 WAV 格式供前端播放"""
+    """将 CosyVoice 返回的音频统一转为 WAV 供前端播放。
+    - 已是 WAV (RIFF header) → 直接返回
+    - MP3 (带/不带 ID3 tag) → pydub 转 WAV，没有 pydub 则原样返回 (浏览器支持)
+    - 原始 PCM → 封装为 WAV (16kHz 16-bit mono)
+    - 其他未知格式 → 原样返回，避免 numpy 类型报错
+    """
     if not audio_data:
         return audio_data
+
+    # 已经是标准 WAV
     if audio_data[:4] == b'RIFF':
-        return audio_data  # 已是 WAV
-    if audio_data[:2] in (b'\xff\xfb', b'\xff\xf3', b'\xff\xfa'):
-        # MP3：浏览器可播放，直接封装为 audio/mpeg
-        # 若需转 WAV，pip install pydub 后启用
+        return audio_data
+
+    # MP3 检测：ID3 tag 或 MPEG sync word (0xFFE0+)
+    is_mp3 = (
+        audio_data[:3] == b'ID3' or
+        (len(audio_data) >= 2 and audio_data[0] == 0xFF and (audio_data[1] & 0xE0) == 0xE0)
+    )
+    if is_mp3:
         try:
             from pydub import AudioSegment
             import tempfile
@@ -447,32 +469,53 @@ def _ensure_wav_bytes(audio_data):
             seg.export(buf, format='wav')
             return buf.getvalue()
         except ImportError:
-            pass  # 无 pydub，返回原始 MP3（前端 <audio> 支持 MP3）
-    # 未知格式 / PCM → WAV
-    return _pcm_to_wav_bytes(audio_data, 48000)
+            # 无 pydub，原样返回 MP3 — 浏览器 <audio> 原生支持
+            return audio_data
+        except Exception as e:
+            voice_log.warning(f"[Voice] MP3→WAV 转换失败: {e}，返回原始音频")
+            return audio_data
+
+    # 尝试作为原始 PCM 封装为 WAV（16kHz 16-bit mono，CosyVoice PCM 格式）
+    try:
+        samples = np.frombuffer(audio_data, dtype=np.int16)
+        buf = io.BytesIO()
+        _write_wav(buf, samples, 16000)  # CosyVoice PCM 输出为 16kHz
+        return buf.getvalue()
+    except ValueError:
+        # 非 PCM 数据（如其他编码格式），原样返回
+        voice_log.warning(f"[Voice] 未知音频格式 ({len(audio_data)} bytes)，原样返回")
+        return audio_data
 
 
 # ============================================================
 # CosyVoice 云端 TTS（阿里云 DashScope）— 流式合成
 # ============================================================
 def _init_cosyvoice():
-    """初始化 CosyVoice（使用百炼平台官方 API 端点）"""
+    """初始化 CosyVoice（使用百炼平台官方 API 端点 或自定义端点）。
+    仅在状态发生变化时打印日志，避免重复刷屏。"""
     global _cosyvoice_available
+    prev_available = _cosyvoice_available
+
     if not COSYVOICE_API_KEY:
-        print("[Voice] CosyVoice: DASHSCOPE_API_KEY 未设置，云端 TTS 不可用")
+        if prev_available:
+            voice_log.warning("[Voice] CosyVoice: DASHSCOPE_API_KEY 已清除，云端 TTS 已禁用")
         _cosyvoice_available = False
         return False
+
     try:
         import dashscope
-        # 官方百炼平台 API 端点
-        dashscope.base_websocket_api_url = 'wss://dashscope.aliyuncs.com/api-ws/v1/inference'
-        dashscope.base_http_api_url = 'https://dashscope.aliyuncs.com/api/v1'
+        # 使用配置的端点（支持自定义/私有部署）
+        dashscope.base_websocket_api_url = COSYVOICE_WS_URL
+        dashscope.base_http_api_url = COSYVOICE_API_URL
         dashscope.api_key = COSYVOICE_API_KEY
         _cosyvoice_available = True
-        print(f"[Voice] ✓ CosyVoice 云端 TTS 可用 (model={COSYVOICE_MODEL}, voice={COSYVOICE_VOICE})")
+        if not prev_available:
+            voice_log.info(f"[Voice] ✓ CosyVoice 云端 TTS 可用 "
+                  f"(endpoint={COSYVOICE_API_URL}, model={COSYVOICE_MODEL}, voice={COSYVOICE_VOICE})")
         return True
     except ImportError:
-        print("[Voice] ✗ dashscope 未安装，CosyVoice 不可用。pip install dashscope")
+        if prev_available:
+            voice_log.warning("[Voice] ✗ dashscope 未安装，CosyVoice 不可用。pip install dashscope")
         _cosyvoice_available = False
         return False
 
@@ -483,35 +526,45 @@ def cosyvoice_is_available():
 
 
 def set_cosyvoice_config(api_key=None, voice=None, model=None,
+                         api_url=None, ws_url=None,
                          volume=None, speech_rate=None, pitch_rate=None):
-    """运行时更新 CosyVoice 配置"""
+    """运行时更新 CosyVoice 配置。
+    注意：传入 None 表示"不修改"，传入空字符串 "" 表示"清除该项"。
+    """
     global COSYVOICE_API_KEY, COSYVOICE_VOICE, COSYVOICE_MODEL, _cosyvoice_available
+    global COSYVOICE_API_URL, COSYVOICE_WS_URL
     global COSYVOICE_VOLUME, COSYVOICE_SPEECH_RATE, COSYVOICE_PITCH_RATE
+
+    key_changed = False
     if api_key is not None:
         COSYVOICE_API_KEY = api_key
+        key_changed = True
     if voice is not None:
         COSYVOICE_VOICE = voice
     if model is not None:
         COSYVOICE_MODEL = model
+    if api_url is not None:
+        COSYVOICE_API_URL = api_url
+    if ws_url is not None:
+        COSYVOICE_WS_URL = ws_url
     if volume is not None:
         COSYVOICE_VOLUME = int(volume)
     if speech_rate is not None:
         COSYVOICE_SPEECH_RATE = float(speech_rate)
     if pitch_rate is not None:
         COSYVOICE_PITCH_RATE = float(pitch_rate)
-    if api_key is not None:
-        _init_cosyvoice()
+
+    if key_changed:
+        _init_cosyvoice()  # 会根据新的 COSYVOICE_API_KEY 值自动设置/禁用
     return cosyvoice_is_available()
 
 
 def _create_cosyvoice_synthesizer():
-    """创建 CosyVoice 合成器（对齐 test.py 的完整参数）"""
-    import dashscope
+    """创建 CosyVoice 合成器。全局 dashscope 配置由 _init_cosyvoice 维护，
+    此处不再重复设置，避免多线程冲突。"""
     from dashscope.audio.tts_v2 import SpeechSynthesizer, AudioFormat
-    dashscope.api_key = COSYVOICE_API_KEY
 
-    # 输出格式映射
-    fmt = AudioFormat.MP3_22050HZ_MONO_256KBPS  # test.py 的默认格式
+    fmt = AudioFormat.MP3_22050HZ_MONO_256KBPS
     if COSYVOICE_FORMAT == "wav":
         fmt = AudioFormat.PCM_16000HZ_MONO_16BIT
 
@@ -612,10 +665,15 @@ def get_voice_status():
         "torch_version": _get_torch_version(),
         # CosyVoice 状态
         "cosyvoice_available": _cosyvoice_available,
+        "cosyvoice_api_url": COSYVOICE_API_URL,
+        "cosyvoice_ws_url": COSYVOICE_WS_URL,
         "cosyvoice_voice": COSYVOICE_VOICE,
         "cosyvoice_model": COSYVOICE_MODEL,
         "cosyvoice_api_key_set": bool(COSYVOICE_API_KEY),
         "cosyvoice_volume": COSYVOICE_VOLUME,
         "cosyvoice_speech_rate": COSYVOICE_SPEECH_RATE,
         "cosyvoice_pitch_rate": COSYVOICE_PITCH_RATE,
+        # VoxCPM2 路径
+        "voxcpm2_hub_path": VOXCPM2_HUB_PATH,
+        "voxcpm2_ref_audio": VOXCPM2_REF_AUDIO,
     }
