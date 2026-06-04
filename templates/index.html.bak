@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>痞老板的凯伦</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+<div class="app-container">
+    <!-- ========== 主聊天区域 ========== -->
+    <main class="chat-main">
+        <header class="chat-header">
+            <div class="header-info">
+                <div class="header-avatar" id="headerAvatar">
+                    <img id="headerAvatarImg" src="/static/uploads/avatars/default_ai.png" alt="AI头像">
+                </div>
+                <div class="header-text">
+                    <h2 id="headerName">小赛</h2>
+                    <span class="online-status">在线</span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button class="btn btn-sm btn-outline btn-voice" id="voiceCallBtn" title="语音通话">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
+                    </svg>
+                </button>
+                <button class="btn btn-sm btn-icon-only" id="settingsBtn" title="设置">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <div class="chat-messages" id="chatMessages">
+            <div class="welcome-message">
+                <div class="welcome-icon">💕</div>
+                <h3>痞老板的凯伦</h3>
+                <p>质疑痞老板，理解痞老板，成为痞老板</p>
+                <p class="welcome-hint">开始聊天吧！点击右上角 📞 开始语音通话</p>
+            </div>
+        </div>
+
+        <div class="typing-indicator" id="typingIndicator" style="display:none;">
+            <div class="typing-avatar"><img id="typingAvatarImg" src="/static/uploads/avatars/default_ai.png" alt="AI头像"></div>
+            <div class="typing-bubble"><div class="typing-dots"><span></span><span></span><span></span></div></div>
+        </div>
+
+        <div class="chat-input-area">
+            <div class="voice-status" id="voiceStatus" style="display:none;">
+                <div class="voice-indicator">
+                    <div class="voice-wave" id="voiceWaveBar"><span></span><span></span><span></span><span></span><span></span></div>
+                    <span class="voice-text" id="voiceStatusText">正在听...</span>
+                </div>
+                <div class="voice-actions">
+                    <button class="btn btn-sm btn-outline" id="interruptBtn" style="display:none;">打断</button>
+                    <button class="btn btn-sm btn-outline-danger" id="endVoiceBtn">挂断</button>
+                </div>
+            </div>
+            <div class="input-container" id="inputContainer">
+                <textarea id="messageInput" class="chat-input" placeholder="输入消息..." rows="1"></textarea>
+                <button class="send-btn" id="sendBtn" title="发送">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                        <path d="M22 2L11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <!-- ========== 设置面板（全屏覆盖层） ========== -->
+    <div class="settings-overlay" id="settingsOverlay" style="display:none;">
+        <div class="settings-panel" id="settingsPanel">
+            <div class="settings-header">
+                <h3 class="settings-title">⚙️ 设置</h3>
+                <button class="settings-close" id="settingsClose">✕</button>
+            </div>
+
+            <div class="settings-tabs" id="settingsTabs">
+                <button class="settings-tab active" data-tab="tab-avatar">👤 头像</button>
+                <button class="settings-tab" data-tab="tab-learn">🧠 风格学习</button>
+                <button class="settings-tab" data-tab="tab-style">🎭 人物风格</button>
+                <button class="settings-tab" data-tab="tab-model">🔧 模型配置</button>
+            </div>
+
+            <div class="settings-content">
+            <!-- Tab: 头像 -->
+            <div class="settings-tab-content active" id="tab-avatar">
+                <div class="settings-section">
+                    <h4>🤖 AI 头像</h4>
+                    <div class="avatar-upload-area">
+                        <div class="avatar-preview" id="aiAvatarPreview">
+                            <img id="aiAvatarImg" src="/static/uploads/avatars/default_ai.png" alt="AI头像">
+                        </div>
+                        <div class="avatar-actions">
+                            <label class="btn btn-sm btn-outline" style="position:relative;overflow:hidden">
+                                <input type="file" accept="image/png,image/jpeg,image/jpg,image/gif,image/webp" id="aiAvatarInput" class="file-input-hidden">上传AI头像
+                            </label>
+                            <button class="btn btn-sm btn-outline-danger" id="removeAiAvatar">✕</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-section">
+                    <h4>👤 我的头像</h4>
+                    <div class="avatar-upload-area">
+                        <div class="avatar-preview" id="userAvatarPreview">
+                            <img id="userAvatarImg" src="/static/uploads/avatars/default_user.png" alt="用户头像">
+                        </div>
+                        <div class="avatar-actions">
+                            <label class="btn btn-sm btn-outline" style="position:relative;overflow:hidden">
+                                <input type="file" accept="image/png,image/jpeg,image/jpg,image/gif,image/webp" id="userAvatarInput" class="file-input-hidden">上传我的头像
+                            </label>
+                            <button class="btn btn-sm btn-outline-danger" id="removeUserAvatar">✕</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab: 风格学习 -->
+            <div class="settings-tab-content" id="tab-learn">
+                <div class="settings-section">
+                    <h4>📷 上传聊天截图</h4>
+                    <p class="settings-hint">支持微信/QQ 聊天截图，自动识别文字并分析风格</p>
+                    <label class="btn btn-primary btn-block" style="position:relative;overflow:hidden">
+                        <input type="file" accept="image/png,image/jpeg,image/jpg,image/gif,image/webp" id="screenshotInput" class="file-input-hidden">
+                        📷 选择截图上传
+                    </label>
+                    <div class="learn-status" id="learnStatus"></div>
+                </div>
+                <div class="settings-section">
+                    <h4>📋 粘贴聊天文本</h4>
+                    <p class="settings-hint">格式：昵称: 消息内容（每行一条）</p>
+                    <textarea id="pasteTextArea" class="settings-textarea" placeholder="女朋友: 宝贝在干嘛~&#10;我: 在想你呀！&#10;女朋友: 今天想吃什么？"></textarea>
+                    <button class="btn btn-primary btn-block" id="submitPasteBtn" style="margin-top:8px;">学习风格</button>
+                </div>
+            </div>
+
+            <!-- Tab: 人物风格 -->
+            <div class="settings-tab-content" id="tab-style">
+                <div class="settings-section">
+                    <h4>💬 AI 名字</h4>
+                    <div class="input-group">
+                        <input type="text" id="aiNameInput" class="input" placeholder="输入名字" value="小赛">
+                        <button class="btn btn-sm btn-primary" id="saveNameBtn">保存</button>
+                    </div>
+                </div>
+                <div class="settings-section">
+                    <h4>📝 当前风格档案</h4>
+                    <div class="style-profile-box" id="styleProfileBox">
+                        <span class="text-muted">暂无风格数据，上传聊天记录让 AI 学习你的风格...</span>
+                    </div>
+                </div>
+                <div class="settings-section">
+                    <h4>🗑️ 数据管理</h4>
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn btn-outline" id="clearChatBtn">清空聊天</button>
+                        <button class="btn btn-outline-danger" id="resetBtn">重置全部数据</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab: 模型配置 -->
+            <div class="settings-tab-content" id="tab-model">
+                <!-- LLM 配置 -->
+                <div class="settings-section">
+                    <h4>🦙 大语言模型</h4>
+                    <label class="settings-label">Ollama API 地址</label>
+                    <input type="text" id="cfgOllamaUrl" class="input" placeholder="http://localhost:11434/api">
+                    <label class="settings-label">模型名称</label>
+                    <select id="cfgModelName" class="input">
+                        <option value="qwen2.5:7b-instruct">Qwen2.5 7B (推荐)</option>
+                        <option value="qwen2.5:14b-instruct">Qwen2.5 14B</option>
+                        <option value="qwen2.5:3b-instruct">Qwen2.5 3B (轻量)</option>
+                        <option value="qwen2.5:32b-instruct">Qwen2.5 32B (需大显存)</option>
+                        <option value="deepseek-r1:8b">DeepSeek-R1 8B</option>
+                        <option value="deepseek-r1:14b">DeepSeek-R1 14B</option>
+                        <option value="llama3:8b">LLaMA3 8B</option>
+                        <option value="mistral:7b">Mistral 7B</option>
+                        <option value="yi:9b">Yi 9B</option>
+                    </select>
+                </div>
+
+                <!-- ASR 配置 -->
+                <div class="settings-section">
+                    <h4>🎤 语音识别 (ASR)</h4>
+                    <label class="settings-label">识别引擎</label>
+                    <select id="cfgAsrEngine" class="input">
+                        <option value="sensevoice">SenseVoiceSmall (本地，推荐)</option>
+                        <option value="whisper">Whisper (本地)</option>
+                    </select>
+                </div>
+
+                <!-- TTS 配置 -->
+                <div class="settings-section">
+                    <h4>🔊 语音合成 (TTS)</h4>
+                    <label class="settings-label">TTS 引擎</label>
+                    <select id="cfgTtsProvider" class="input">
+                        <option value="cosyvoice">☁️ CosyVoice (在线)</option>
+                        <option value="voxcpm2">💻 VoxCPM2 (本地)</option>
+                    </select>
+
+                    <!-- ========== CosyVoice 在线配置 ========== -->
+                    <div id="cosyvoiceConfig">
+                        <label class="settings-label">🔗 API 地址</label>
+                        <input type="text" id="cfgCosyvoiceApiUrl" class="input" placeholder="https://dashscope.aliyuncs.com/api/v1">
+                        <span class="input-hint" style="font-size:11px;color:#888;">DashScope / 百炼平台 或自定义端点</span>
+
+                        <label class="settings-label">🤖 模型名称</label>
+                        <input type="text" id="cfgCosyvoiceModel" class="input" placeholder="cosyvoice-v3-flash">
+                        <span class="input-hint" style="font-size:11px;color:#888;">如 cosyvoice-v3-flash, cosyvoice-v2 等</span>
+
+                        <label class="settings-label">🔑 API Key</label>
+                        <div style="display:flex;gap:8px;">
+                            <div style="position:relative;flex:1;">
+                                <input type="password" id="cfgCosyvoiceKey" class="input" placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx" style="width:100%;padding-right:36px;">
+                                <button class="toggle-password-btn" id="toggleApiKeyBtn" type="button" title="显示/隐藏 API Key" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:6px;color:#888;font-size:16px;line-height:1;">👁️</button>
+                            </div>
+                            <button class="btn btn-sm btn-outline" id="testApiBtn" style="white-space:nowrap;">🔗 测试连接</button>
+                        </div>
+                        <span class="test-status" id="apiTestStatus"></span>
+
+                        <label class="settings-label">⭐ 音色选择</label>
+                        <div class="tts-voice-grid" id="ttsVoiceGrid">
+                            <div class="tts-voice-card selected" data-voice="longxing_v3">
+                                <div class="voice-name">龙星</div>
+                                <div class="voice-desc">御姐 · 成熟优雅</div>
+                                <button class="voice-preview-btn" data-voice="longxing_v3" title="试听">▶</button>
+                            </div>
+                            <div class="tts-voice-card" data-voice="longxiaochun_v3">
+                                <div class="voice-name">龙小春</div>
+                                <div class="voice-desc">活泼 · 元气少女</div>
+                                <button class="voice-preview-btn" data-voice="longxiaochun_v3" title="试听">▶</button>
+                            </div>
+                            <div class="tts-voice-card" data-voice="longxiaoxia_v3">
+                                <div class="voice-name">龙小夏</div>
+                                <div class="voice-desc">温柔 · 邻家女孩</div>
+                                <button class="voice-preview-btn" data-voice="longxiaoxia_v3" title="试听">▶</button>
+                            </div>
+                            <div class="tts-voice-card" data-voice="longyue_v3">
+                                <div class="voice-name">龙悦</div>
+                                <div class="voice-desc">甜美 · 可爱女声</div>
+                                <button class="voice-preview-btn" data-voice="longyue_v3" title="试听">▶</button>
+                            </div>
+                            <div class="tts-voice-card" data-voice="longmiao_v3">
+                                <div class="voice-name">龙喵</div>
+                                <div class="voice-desc">软萌 · 猫系少女</div>
+                                <button class="voice-preview-btn" data-voice="longmiao_v3" title="试听">▶</button>
+                            </div>
+                            <div class="tts-voice-card" data-voice="longcheng_v3">
+                                <div class="voice-name">龙橙</div>
+                                <div class="voice-desc">阳光 · 温暖男声</div>
+                                <button class="voice-preview-btn" data-voice="longcheng_v3" title="试听">▶</button>
+                            </div>
+                        </div>
+                        <input type="hidden" id="cfgCosyvoiceVoice" value="longxing_v3">
+                    </div>
+
+                    <!-- ========== VoxCPM2 本地配置 ========== -->
+                    <div id="voxcpm2Config" style="display:none;">
+                        <label class="settings-label">📁 模型路径</label>
+                        <input type="text" id="cfgVoxcpm2Path" class="input" placeholder="C:\Users\...\.cache\huggingface\hub\models--openbmb--VoxCPM2">
+                        <span class="input-hint" style="font-size:11px;color:#888;">HuggingFace 缓存路径或自定义模型目录</span>
+
+                        <label class="settings-label">🎵 参考音频路径 (可选)</label>
+                        <input type="text" id="cfgVoxcpm2RefAudio" class="input" placeholder="留空使用默认，或填写 WAV 文件路径">
+                        <span class="input-hint" style="font-size:11px;color:#888;">用于音色克隆的参考音频（16kHz+ WAV）</span>
+                    </div>
+                </div>
+
+                <!-- 保存 -->
+                <div class="settings-section" style="text-align:center;">
+                    <button class="btn btn-primary btn-block" id="saveSettingsBtn">💾 保存设置</button>
+                    <p class="settings-save-status" id="settingsSaveStatus"></p>
+                </div>
+            </div>
+        </div>
+            </div>
+        </div>
+</div>
+
+<!-- ========== 语音通话全屏界面 ========== -->
+<div class="call-overlay" id="callOverlay" style="display:none;">
+    <div class="call-screen">
+<div class="call-body">
+            <div class="call-avatar-ring" id="callAvatarRing">
+                <div class="call-avatar-large">
+                    <img id="callAvatarImg" src="/static/uploads/avatars/default_ai.png" alt="AI">
+                </div>
+                <div class="call-ring-wave"></div>
+            </div>
+
+            <div class="call-name" id="callName">小赛</div>
+            <div class="call-status-dot" id="callStatusDot"></div>
+        </div>
+
+        <div class="call-actions-bar">
+            <button class="call-action-btn" id="callInterruptBtn" title="打断">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+            </button>
+            <button class="call-action-btn call-end-btn" id="callEndBtn" title="挂断">
+                <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" transform="rotate(135, 12, 12)"/></svg>
+            </button>
+            <button class="call-action-btn" id="callMuteBtn" title="静音">
+                <!-- 未静音：正常麦克风 -->
+                <svg class="mute-icon-on" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                    <line x1="12" y1="19" x2="12" y2="23"/>
+                    <line x1="8" y1="23" x2="16" y2="23"/>
+                </svg>
+                <!-- 已静音：麦克风 + 斜杠 -->
+                <svg class="mute-icon-off" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                    <line x1="12" y1="19" x2="12" y2="23"/>
+                    <line x1="8" y1="23" x2="16" y2="23"/>
+                    <line x1="1" y1="1" x2="23" y2="23" stroke="#ff4757" stroke-width="3"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- 学习结果弹窗 -->
+<div class="modal-overlay" id="learnResultModal" style="display:none;">
+    <div class="modal modal-lg">
+        <div class="modal-header"><h3>学习结果</h3><button class="modal-close" id="closeLearnModal">✕</button></div>
+        <div class="modal-body">
+            <div class="result-section"><h4>📷 OCR 识别文本：</h4><pre id="learnOcrText"></pre></div>
+            <div class="result-section"><h4>📝 风格分析：</h4><pre id="learnStyleAnalysis"></pre></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-primary" id="closeLearnBtn">确定</button></div>
+    </div>
+</div>
+
+<audio id="voiceAudio" style="display:none;"></audio>
+<script src="/static/js/main.js"></script>
+</body>
+</html>
